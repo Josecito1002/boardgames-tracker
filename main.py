@@ -92,6 +92,33 @@ WISHLIST = [
 ]
 
 
+def sanear_para_log(valor):
+    """Prepara un texto para imprimirlo sin que GitHub Actions lo tape.
+
+    GitHub reemplaza por '***' cualquier fragmento del log que coincida con
+    un secret, y en el caso de un secret MULTILÍNEA lo hace línea por línea.
+    Si FB_COOKIES está guardado como JSON "bonito", sus líneas sueltas '['
+    y ']' convierten cada corchete del log en '***' — por eso en las
+    corridas anteriores se veía '##***endgroup***' en lugar de
+    '##[endgroup]' y '(div***role=article***)' en lugar de
+    '(div[role=article])'. Además, el ID numérico de la cuenta aparece en
+    casi todos los hrefs y puede coincidir con CHAT_ID.
+
+    Para el diagnóstico solo necesitamos el PATRÓN de la ruta, así que:
+      - cada dígito se sustituye por '#'
+      - los corchetes se sustituyen por paréntesis angulares
+    Así ningún fragmento impreso puede coincidir con un secret.
+    """
+    texto = re.sub(r"\d", "#", str(valor))
+    return texto.replace("[", "⟨").replace("]", "⟩")
+
+
+def lista_para_log(items):
+    """Imprime una lista sin usar la repr de Python (que lleva corchetes)."""
+    if not items:
+        return "(vacío)"
+    return " | ".join(sanear_para_log(i) for i in items)
+
 def evaluar_alerta_telegram(texto):
     """Decide si vale la pena notificar por Telegram.
 
@@ -360,6 +387,65 @@ def descargar_fotos_reales(page, iid):
     return rutas
 
 
+def extraer_publicaciones_del_html(html, slug_grupo):
+    """Saca IDs de publicaciones del HTML crudo del grupo.
+
+    Facebook ya casi no entrega <a href="/groups/x/posts/123"> en el feed:
+    los enlaces se arman con JavaScript al hacer clic, así que buscarlos con
+    query_selector_all devuelve 0 aunque el feed sí haya cargado. Los IDs,
+    en cambio, sí viajan en el payload JSON incrustado en la página, y de ahí
+    se puede reconstruir el permalink canónico.
+
+    Se quitan las barras invertidas primero porque dentro del JSON incrustado
+    las comillas y las barras vienen escapadas (\"post_id\":\"123\",
+    \/groups\/...).
+    """
+    plano = html.replace("\\", "")
+    ids = []
+
+    patrones = [
+        r"/groups/[^/\"?\s]+/posts/(\d{8,})",
+        r"/groups/[^/\"?\s]+/permalink/(\d{8,})",
+        r"/groups/[^/\"?\s]+/multi_permalinks/(\d{8,})",
+        r'"post_id":"(\d{8,})"',
+        r'"top_level_post_id":"(\d{8,})"',
+        r"story_fbid[=:\"]+(\d{8,})",
+    ]
+    for patron in patrones:
+        for pid in re.findall(patron, plano):
+            if pid not in ids:
+                ids.append(pid)
+
+    return [
+        (pid, f"https://www.facebook.com/groups/{slug_grupo}/posts/{pid}/")
+        for pid in ids
+    ]
+
+
+def esperar_feed_del_grupo(page, intentos=10):
+    """Espera a que el feed del grupo deje de crecer antes de leerlo.
+
+    Sin esto se lee la página cuando todavía está el esqueleto de carga (los
+    'Facebook Facebook Facebook...' que salen en el log son el alt de las
+    imágenes placeholder), y se detectan solo los 2 bloques del carrusel de
+    'Destacados'.
+    """
+    try:
+        page.wait_for_selector('div[role="feed"]', timeout=15000)
+    except Exception:
+        pass
+
+    previos = -1
+    for _ in range(intentos):
+        actuales = len(page.query_selector_all('div[role="article"]'))
+        if actuales >= 6 and actuales == previos:
+            break
+        previos = actuales
+        page.evaluate("window.scrollBy(0, 1400)")
+        page.wait_for_timeout(2000)
+    return len(page.query_selector_all('div[role="article"]'))
+
+
 def resolver_url_grupo(page, url_grupo):
     """Normaliza la URL de un grupo/pestaña de grupo de Facebook a
     www.facebook.com, preservando cualquier sub-ruta (ej. /buy_sell_discussion/)
@@ -445,16 +531,10 @@ def raspar_grupo(page, url_grupo, vistos, max_posts=5):
         print(f"   Título de la página cargada: {titulo_pagina!r}", flush=True)
         print(f"   Primeros 500 caracteres visibles: {texto_pagina!r}", flush=True)
 
-        for intento_scroll in range(8):
-            page.evaluate("window.scrollBy(0, 1400)")
-            page.wait_for_timeout(2000)
-            n_articulos_parcial = len(page.query_selector_all('div[role="article"]'))
-            if n_articulos_parcial >= 6:
-                break
-
+        esperar_feed_del_grupo(page)
         articulos = page.query_selector_all('div[role="article"]')
         print(
-            f"   Bloques de publicación (div[role=article]) detectados:"
+            f"   Bloques de publicación (div role=article) detectados:"
             f" {len(articulos)}",
             flush=True,
         )
@@ -465,48 +545,118 @@ def raspar_grupo(page, url_grupo, vistos, max_posts=5):
         )
         print(f"   Links con /posts|permalink| detectados: {len(enlaces)}", flush=True)
 
-        # Diagnóstico: si no encontramos links con el patrón esperado, mostrar
-        # solo la RUTA (sin query params) de los hrefs reales que sí existen,
-        # para descubrir el formato actual sin arriesgar que algún número de
-        # tracking en la query coincida por casualidad con un secret y GitHub
-        # lo enmascare como "***".
-        if len(enlaces) == 0 and articulos:
-            print("   🔎 Rutas reales encontradas en los primeros bloques (sin query params):", flush=True)
-            for i, art in enumerate(articulos[:3], 1):
-                hrefs_crudos = [
-                    a.get_attribute("href")
-                    for a in art.query_selector_all("a[href]")
-                ]
-                rutas = []
-                for h in hrefs_crudos:
-                    if not h:
-                        continue
-                    ruta = urllib.parse.urlparse(h).path
-                    if ruta and ruta not in rutas:
-                        rutas.append(ruta)
-                print(f"      Bloque {i}: {rutas[:15]}", flush=True)
+        # Diagnóstico: si no encontramos links con el patrón esperado,
+        # mostrar qué rutas SÍ existen para descubrir el formato actual.
+        # Todo pasa por sanear_para_log() para que GitHub no lo tape con
+        # "***": dígitos a '#' (pueden coincidir con CHAT_ID) y corchetes a
+        # '⟨⟩' (un secret multilínea como FB_COOKIES en JSON "bonito" hace
+        # que GitHub enmascare cada '[' y ']' sueltos del log).
+        if len(enlaces) == 0:
+            print(
+                "   🔎 Diagnóstico v# activo"
+                " (dígitos a #, corchetes a ⟨⟩ para evitar el enmascarado)",
+                flush=True,
+            )
+            # 1) Rutas dentro de los bloques detectados. Ojo: los primeros
+            #    bloques suelen ser el carrusel de "Destacados" y no
+            #    publicaciones reales, por eso más abajo revisamos también
+            #    TODOS los links de la página.
+            if articulos:
+                print(
+                    "   🔎 Rutas dentro de los bloques detectados"
+                    " (dígitos enmascarados con #):",
+                    flush=True,
+                )
+                for i, art in enumerate(articulos[:3], 1):
+                    rutas = []
+                    for a in art.query_selector_all("a[href]"):
+                        h = a.get_attribute("href")
+                        if not h:
+                            continue
+                        ruta = urllib.parse.urlparse(h).path
+                        if ruta and ruta not in rutas:
+                            rutas.append(ruta)
+                    print(
+                        f"      Bloque {i}"
+                        f" ({len(rutas)} rutas): {lista_para_log(rutas[:15])}",
+                        flush=True,
+                    )
 
-        posts_pendientes = []
+            # 2) Censo de TODOS los links de la página, no solo los que están
+            #    dentro de los bloques. Agrupamos rutas idénticas (ya
+            #    enmascaradas) para ver de un vistazo qué formatos hay.
+            todos = page.query_selector_all("a[href]")
+            print(
+                f"   🔎 Links totales en la página: {len(todos)}"
+                " — rutas más comunes (dígitos enmascarados con #):",
+                flush=True,
+            )
+            conteo_rutas = {}
+            for a in todos:
+                h = a.get_attribute("href")
+                if not h:
+                    continue
+                ruta = urllib.parse.urlparse(h).path
+                if not ruta or ruta == "/":
+                    continue
+                patron = sanear_para_log(ruta)
+                conteo_rutas[patron] = conteo_rutas.get(patron, 0) + 1
+            for patron, veces in sorted(
+                conteo_rutas.items(), key=lambda kv: kv[1], reverse=True
+            )[:30]:
+                print(f"      {veces:>3}x {patron}", flush=True)
+
+            # 3) Rutas que huelen a publicación aunque no usen /posts/ ni
+            #    /permalink/ (story_fbid, ?story, /groups/<id>/<algo>, etc.).
+            sospechosas = sorted(
+                patron
+                for patron in conteo_rutas
+                if "/groups/" in patron
+                and patron.rstrip("/").count("/") >= 3
+            )
+            print(
+                "   🔎 Rutas candidatas a publicación dentro del grupo:"
+                f" {lista_para_log(sospechosas[:20])}",
+                flush=True,
+            )
+
+        # Candidatos: primero los <a href> clásicos, y si el feed no trae
+        # ninguno (lo normal hoy: Facebook arma los links con JavaScript al
+        # hacer clic), los IDs incrustados en el payload JSON de la página.
+        candidatos = []
         for a in enlaces:
             href = a.get_attribute("href") or ""
             m = re.search(r"/(?:posts|permalink|multi_permalinks)/(\d+)", href)
             if m:
-                pid = m.group(1)
-                iid = f"GRUPO_{pid}"
-                clean_url = href.split("?")[0]
-                if (
-                    iid not in vistos
-                    and pid not in [p[0] for p in posts_pendientes]
-                    and pid != "0"
-                ):
-                    posts_pendientes.append((pid, clean_url))
+                candidatos.append((m.group(1), href.split("?")[0]))
+
+        slug_grupo = re.search(r"/groups/([^/?]+)", url_resuelta)
+        slug_grupo = slug_grupo.group(1) if slug_grupo else None
+        if not candidatos and slug_grupo:
+            desde_html = extraer_publicaciones_del_html(page.content(), slug_grupo)
+            print(
+                f"   🔎 IDs de publicación encontrados en el HTML de la"
+                f" página: {len(desde_html)}",
+                flush=True,
+            )
+            candidatos = desde_html
+
+        posts_pendientes = []
+        for pid, url_post in candidatos:
+            iid = f"GRUPO_{pid}"
+            if (
+                iid not in vistos
+                and pid not in [p[0] for p in posts_pendientes]
+                and pid != "0"
+            ):
+                posts_pendientes.append((pid, url_post))
 
         total = min(len(posts_pendientes), max_posts)
         print(f"   Publicaciones detectadas en el grupo: {total}", flush=True)
 
         for idx, (pid, post_url) in enumerate(posts_pendientes[:total], 1):
             iid = f"GRUPO_{pid}"
-            print(f"   [{idx}/{total}] Abriendo post del grupo ID {pid}...", flush=True)
+            print(f"   {idx}/{total} · Abriendo post del grupo ID {pid}...", flush=True)
             try:
                 page.goto(post_url, timeout=25000, wait_until="domcontentloaded")
                 page.wait_for_timeout(2500)
@@ -605,7 +755,7 @@ def raspar():
 
         # 1. PUBLICACIONES PRIORITARIAS (SI EXISTIERAN NUEVAS)
         for idx, url_prio in enumerate(URLS_PRIORITARIAS, 1):
-            print(f"\n[PRIORITARIO {idx}/{len(URLS_PRIORITARIAS)}] Abriendo: {url_prio}", flush=True)
+            print(f"\nPRIORITARIO {idx}/{len(URLS_PRIORITARIAS)} · Abriendo: {url_prio}", flush=True)
             try:
                 page.goto(url_prio, timeout=35000, wait_until="domcontentloaded")
                 page.wait_for_timeout(3000)
@@ -691,7 +841,7 @@ def raspar():
 
                 for idx, iid in enumerate(iids_pendientes[:total_termino], 1):
                     post_url = f"https://www.facebook.com/marketplace/item/{iid}/"
-                    print(f"   [{idx}/{total_termino}] Abriendo ID {iid}...", flush=True)
+                    print(f"   {idx}/{total_termino} · Abriendo ID {iid}...", flush=True)
 
                     try:
                         page.goto(post_url, timeout=20000, wait_until="domcontentloaded")
