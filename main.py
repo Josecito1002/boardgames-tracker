@@ -26,9 +26,9 @@ GMAIL_APP_PASS = os.environ.get("GMAIL_APP_PASS")
 # 1. Enlaces prioritarios (deja vacío; solo añade si tienes un post nuevo puntual)
 URLS_PRIORITARIAS = []
 
-# 2. Grupos de Facebook a rastrear (usa la URL de www.facebook.com/groups/<id-o-nombre>/)
+# 2. Grupos de Facebook a rastrear (pestaña de Compraventa, no el feed general)
 URLS_GRUPOS = [
-    "https://www.facebook.com/groups/boardgamesgt/",
+    "https://www.facebook.com/groups/boardgamesgt/buy_sell_discussion/",
 ]
 
 # 3. Términos de búsqueda en Marketplace (Mixco / Guatemala)
@@ -361,26 +361,35 @@ def descargar_fotos_reales(page, iid):
 
 
 def resolver_url_grupo(page, url_grupo):
-    """Normaliza la URL de un grupo de Facebook a la versión de www.facebook.com
-    con orden cronológico, aceptando tanto IDs numéricos (/groups/123456789/)
-    como nombres de vanity (/groups/boardgamesgt/). Si url_grupo es un link de
-    invitación corto (facebook.com/share/g/<code>/), lo visita primero y deja
-    que Facebook redirija a la URL canónica.
+    """Normaliza la URL de un grupo/pestaña de grupo de Facebook a
+    www.facebook.com, preservando cualquier sub-ruta (ej. /buy_sell_discussion/)
+    y agregando orden cronológico si no se especificó otro parámetro de orden.
+    Si url_grupo es un link de invitación corto (facebook.com/share/g/<code>/)
+    sin un /groups/<algo>/ explícito, lo visita primero y sigue la
+    redirección de Facebook para obtener la URL canónica.
     """
-    m_directo = re.search(r"facebook\.com/groups/([^/?]+)", url_grupo)
-    if m_directo:
-        identificador = m_directo.group(1)
-        return f"https://www.facebook.com/groups/{identificador}/?sorting_setting=CHRONOLOGICAL"
+
+    def _normalizar(url):
+        url = re.sub(
+            r"https?://(m|mbasic|web)\.facebook\.com",
+            "https://www.facebook.com",
+            url,
+        )
+        if "sorting_setting" not in url:
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}sorting_setting=CHRONOLOGICAL"
+        return url
+
+    if re.search(r"facebook\.com/groups/[^/?]+", url_grupo):
+        return _normalizar(url_grupo)
 
     # No vino con /groups/<algo>/ directo (ej. un link de invitación /share/g/...):
     # lo visitamos y vemos a dónde redirige Facebook.
     page.goto(url_grupo, timeout=40000, wait_until="domcontentloaded")
     page.wait_for_timeout(2000)
 
-    m = re.search(r"facebook\.com/groups/([^/?]+)", page.url)
-    if m:
-        identificador = m.group(1)
-        return f"https://www.facebook.com/groups/{identificador}/?sorting_setting=CHRONOLOGICAL"
+    if re.search(r"facebook\.com/groups/[^/?]+", page.url):
+        return _normalizar(page.url)
 
     print(
         f"   ⚠️ No se pudo resolver un ID/nombre de grupo desde: {url_grupo}\n"
@@ -457,17 +466,25 @@ def raspar_grupo(page, url_grupo, vistos, max_posts=5):
         print(f"   Links con /posts|permalink| detectados: {len(enlaces)}", flush=True)
 
         # Diagnóstico: si no encontramos links con el patrón esperado, mostrar
-        # los hrefs reales que sí existen dentro de los primeros bloques para
-        # descubrir el formato actual que usa Facebook.
+        # solo la RUTA (sin query params) de los hrefs reales que sí existen,
+        # para descubrir el formato actual sin arriesgar que algún número de
+        # tracking en la query coincida por casualidad con un secret y GitHub
+        # lo enmascare como "***".
         if len(enlaces) == 0 and articulos:
-            print("   🔎 Volcando hrefs reales de los primeros bloques para diagnóstico:", flush=True)
+            print("   🔎 Rutas reales encontradas en los primeros bloques (sin query params):", flush=True)
             for i, art in enumerate(articulos[:3], 1):
-                hrefs = [
+                hrefs_crudos = [
                     a.get_attribute("href")
                     for a in art.query_selector_all("a[href]")
                 ]
-                hrefs = [h for h in hrefs if h][:15]
-                print(f"      Bloque {i}: {hrefs}", flush=True)
+                rutas = []
+                for h in hrefs_crudos:
+                    if not h:
+                        continue
+                    ruta = urllib.parse.urlparse(h).path
+                    if ruta and ruta not in rutas:
+                        rutas.append(ruta)
+                print(f"      Bloque {i}: {rutas[:15]}", flush=True)
 
         posts_pendientes = []
         for a in enlaces:
