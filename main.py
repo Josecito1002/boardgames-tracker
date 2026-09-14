@@ -12,7 +12,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL = "gemini-3.6-flash"
-SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY", "44a554e4564c3404c3914b50b27b232d")
+SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY") or "44a554e4564c3404c3914b50b27b232d"
 
 # 1. Enviar alerta a Telegram
 def enviar_alerta(titulo, precio, rating_bgg, rank_bgg, peso_bgg, url_post, thumbnail=None):
@@ -134,7 +134,7 @@ def ejecutar_revision():
         "url": url_objetivo,
         "render": "true"
     })
-    api_url = f"http://api.scraperapi.com?{params}"
+    api_url = f"https://api.scraperapi.com?{params}"
 
     print("Consultando Facebook Marketplace via ScraperAPI con IP residencial...")
     try:
