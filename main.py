@@ -1,7 +1,6 @@
 import os, json, re, urllib.request, urllib.parse, xml.etree.ElementTree as ET
 from playwright.sync_api import sync_playwright
 
-# Variables de entorno
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
@@ -91,43 +90,55 @@ def raspar():
         try:
             print("Navegando a Marketplace Ciudad de Guatemala...")
             page.goto(url, timeout=45000)
-            page.wait_for_timeout(5000)
+            page.wait_for_timeout(6000)
             try:
                 page.keyboard.press("Escape")
                 for s in ['[aria-label="Cerrar"]', '[aria-label="Close"]', 'div[role="button"]:has-text("Ahora no")']:
                     btn = page.query_selector(s)
                     if btn: btn.click(); page.wait_for_timeout(1000)
             except Exception: pass
-            for _ in range(2): page.evaluate("window.scrollBy(0, 800)"); page.wait_for_timeout(2000)
 
-            print(f"URL real: {page.url} | Titulo: {page.title()}")
-            print("Texto visible:", page.inner_text("body")[:250].replace("\n", " "))
+            # Scroll amplio para activar la carga de publicaciones
+            for _ in range(3):
+                page.evaluate("window.scrollBy(0, 1000)")
+                page.wait_for_timeout(2000)
 
-            enlaces = page.query_selector_all('a[href*="/item/"], a[href*="/marketplace/item/"]')
-            print(f"Se encontraron {len(enlaces)} publicaciones con /item/.")
+            # Buscar dentro de la sección principal (MAIN)
+            main_elem = page.query_selector('div[role="main"]')
+            if main_elem:
+                print("Contenido de MAIN:\n", main_elem.inner_text()[:300].replace("\n", " "))
+                enlaces = main_elem.query_selector_all("a")
+                print(f"Total enlaces dentro de MAIN: {len(enlaces)}")
+            else:
+                print("Buscando en toda la pagina...")
+                enlaces = page.query_selector_all("a")
 
-            links_mp = [a.get_attribute("href") for a in page.query_selector_all("a") if "/marketplace/" in (a.get_attribute("href") or "")]
-            print(f"Total enlaces de marketplace en pagina: {len(links_mp)}")
-            if links_mp:
-                print(f"Ejemplo de enlace marketplace: {links_mp[0]}")
-
-            for a in enlaces[:15]:
+            items_procesados = 0
+            for a in enlaces:
                 href = a.get_attribute("href") or ""
-                if "/item/" not in href: continue
-                iid = href.split("/item/").split("/")[0].split("?")[0]
+                txt = a.inner_text().strip()
+                if not href or len(txt) < 5: continue
+
+                m = re.search(r"/item/(\d+)", href)
+                iid = m.group(1) if m else None
+                if not iid: continue
+
                 if iid in vistos: continue
                 vistos.add(iid)
                 post_url = f"https://www.facebook.com/marketplace/item/{iid}/"
-                txt = a.inner_text()
-                print(f"ID {iid}: {txt[:80]}...")
+                print(f"\nID {iid}: {txt[:80]}...")
+                items_procesados += 1
+
                 for item in extraer_ia(txt):
                     p = item.get("precio")
                     if p and 15.0 <= p <= 250.0:
                         bgg = info_bgg(item.get("juego"))
                         if bgg:
-                            print(f"🚨 Alerta: {bgg['nombre']} Q{p}")
+                            print(f"🚨 Alerta enviada: {bgg['nombre']} a Q{p}")
                             alerta(bgg["nombre"], p, bgg["rating"], bgg["rank"], bgg["weight"], post_url, bgg["thumb"])
-        except Exception as e: print("Error:", e)
+
+            print(f"\nTotal items procesados: {items_procesados}")
+        except Exception as e: print("Error durante scraping:", e)
         finally: b.close()
 
     with open("vistos.json", "w") as f: json.dump(list(vistos), f, indent=2)
@@ -135,4 +146,4 @@ def raspar():
 
 if __name__ == "__main__":
     raspar()
-            
+    
