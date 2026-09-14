@@ -85,6 +85,12 @@ PALABRAS_CLAVE_JUEGO = [
     "guia del dungeon master",
 ]
 
+# Cuántas publicaciones nuevas procesar como máximo por corrida.
+# Cada una implica abrirla, descargar fotos, pasarles OCR y enviar el correo,
+# así que subirlas alarga la corrida y la cantidad de correos de golpe.
+MAX_POSTS_GRUPO = 15
+MAX_POSTS_MARKETPLACE = 5
+
 # Juegos que quieres seguir sin importar el precio.
 WISHLIST = [
     "slay the spire",
@@ -517,7 +523,7 @@ def resolver_url_grupo(page, url_grupo):
     return None
 
 
-def raspar_grupo(page, url_grupo, vistos, max_posts=5):
+def raspar_grupo(page, url_grupo, vistos, max_posts=MAX_POSTS_GRUPO):
     """Rastrea publicaciones de venta en el grupo de Facebook."""
     print(f"\n👥 Accediendo al grupo de Facebook: {url_grupo}...", flush=True)
     try:
@@ -887,7 +893,7 @@ def raspar():
                         ):
                             iids_pendientes.append(iid)
 
-                total_termino = min(len(iids_pendientes), 5)
+                total_termino = min(len(iids_pendientes), MAX_POSTS_MARKETPLACE)
                 print(f"   Nuevos avisos para '{termino}': {total_termino}", flush=True)
 
                 for idx, iid in enumerate(iids_pendientes[:total_termino], 1):
