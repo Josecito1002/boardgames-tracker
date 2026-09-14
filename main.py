@@ -63,7 +63,7 @@ def extraer_ia(texto):
 
 def raspar():
     vistos = set(json.load(open("vistos.json"))) if os.path.exists("vistos.json") else set()
-    url = "https://www.facebook.com/marketplace/guatemalacity/search/?query=juegos%20de%20mesa"
+    url = "https://www.facebook.com/marketplace/search/?query=juegos%20de%20mesa"
     with sync_playwright() as p:
         b = p.chromium.launch(headless=True)
         ctx = b.new_context(
@@ -88,9 +88,16 @@ def raspar():
 
         page = ctx.new_page()
         try:
-            print("Navegando a Marketplace Ciudad de Guatemala...")
+            print("Navegando al buscador oficial de Marketplace...")
             page.goto(url, timeout=45000)
-            page.wait_for_timeout(6000)
+
+            # Esperar activamente a que aparezcan las publicaciones en el DOM
+            try:
+                page.wait_for_selector('a[href*="/marketplace/item/"], a[href*="/item/"]', timeout=15000)
+                print("✅ ¡Publicaciones detectadas en el DOM!")
+            except Exception:
+                print("Aviso: Espera agotada, cargando mediante scroll...")
+
             try:
                 page.keyboard.press("Escape")
                 for s in ['[aria-label="Cerrar"]', '[aria-label="Close"]', 'div[role="button"]:has-text("Ahora no")']:
@@ -98,20 +105,12 @@ def raspar():
                     if btn: btn.click(); page.wait_for_timeout(1000)
             except Exception: pass
 
-            # Scroll amplio para activar la carga de publicaciones
             for _ in range(3):
                 page.evaluate("window.scrollBy(0, 1000)")
                 page.wait_for_timeout(2000)
 
-            # Buscar dentro de la sección principal (MAIN)
-            main_elem = page.query_selector('div[role="main"]')
-            if main_elem:
-                print("Contenido de MAIN:\n", main_elem.inner_text()[:300].replace("\n", " "))
-                enlaces = main_elem.query_selector_all("a")
-                print(f"Total enlaces dentro de MAIN: {len(enlaces)}")
-            else:
-                print("Buscando en toda la pagina...")
-                enlaces = page.query_selector_all("a")
+            enlaces = page.query_selector_all('a[href*="/marketplace/item/"], a[href*="/item/"]')
+            print(f"Total publicaciones encontradas: {len(enlaces)}")
 
             items_procesados = 0
             for a in enlaces:
@@ -137,7 +136,7 @@ def raspar():
                             print(f"🚨 Alerta enviada: {bgg['nombre']} a Q{p}")
                             alerta(bgg["nombre"], p, bgg["rating"], bgg["rank"], bgg["weight"], post_url, bgg["thumb"])
 
-            print(f"\nTotal items procesados: {items_procesados}")
+            print(f"\nTotal items nuevos procesados: {items_procesados}")
         except Exception as e: print("Error durante scraping:", e)
         finally: b.close()
 
