@@ -26,7 +26,13 @@ jobs:
         run: |
           pip install playwright
           playwright install chromium --with-deps
-
+          
+      - name: Instalar Tesseract OCR
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-spa
+          pip install pytesseract pillow
+          
       - name: Ejecutar revision de Marketplace
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
