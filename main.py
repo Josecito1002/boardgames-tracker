@@ -1,4 +1,5 @@
-import os, json, re, base64, time, urllib.request, urllib.parse
+import os, json, re, base64, time, csv, urllib.request, urllib.parse
+from datetime import datetime
 from playwright.sync_api import sync_playwright
 
 # Variables de entorno leídas de forma segura desde GitHub Secrets
@@ -6,6 +7,49 @@ TG_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID") or "5171466462"
 GEMINI_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
 FB_COOKIES = os.environ.get("FB_COOKIES")
+
+CSV_FILE = "historial_juegos.csv"
+CAMPOS_CSV = [
+    "Fecha", "Juego", "Precio Marketplace (GTQ)", "Precio Texto", "Origen Precio",
+    "Oportunidad (<= Q250)", "Precio Amazon (USD)", "Equivalente Amazon (GTQ)",
+    "Ahorro Estimado (%)", "BGG Rating", "BGG Complejidad", "ID Publicacion", "Enlace Marketplace"
+]
+
+def registrar_en_csv(item_data, post_url, iid):
+    archivo_nuevo = not os.path.exists(CSV_FILE)
+    try:
+        with open(CSV_FILE, "a", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=CAMPOS_CSV)
+            if archivo_nuevo:
+                writer.writeheader()
+            
+            p_post = item_data.get("precio_post")
+            p_usd = item_data.get("precio_amazon_usd")
+            equiv_gtq = round(p_usd * 7.80, 2) if (p_usd and p_usd > 0) else None
+            
+            ahorro = None
+            if p_post and p_post > 0 and equiv_gtq and equiv_gtq > p_post:
+                ahorro = f"{round(((equiv_gtq - p_post) / equiv_gtq) * 100)}%"
+
+            es_oportunidad = "SÍ" if (p_post and 15.0 <= p_post <= 250.0) else "NO"
+
+            writer.writerow({
+                "Fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "Juego": item_data.get("juego", "Desconocido"),
+                "Precio Marketplace (GTQ)": p_post or "",
+                "Precio Texto": item_data.get("precio_estimado_post", ""),
+                "Origen Precio": item_data.get("origen_precio", ""),
+                "Oportunidad (<= Q250)": es_oportunidad,
+                "Precio Amazon (USD)": p_usd or "",
+                "Equivalente Amazon (GTQ)": equiv_gtq or "",
+                "Ahorro Estimado (%)": ahorro or "",
+                "BGG Rating": item_data.get("rating_bgg", ""),
+                "BGG Complejidad": item_data.get("peso_bgg", ""),
+                "ID Publicacion": iid,
+                "Enlace Marketplace": post_url
+            })
+    except Exception as e:
+        print(f"Error al escribir en CSV: {e}", flush=True)
 
 def tg_send(texto):
     try:
@@ -36,7 +80,6 @@ def alerta(item_data, url_post, thumb=None):
     rating = item_data.get("rating_bgg")
     peso = item_data.get("peso_bgg")
 
-    # Distintivo si está en tu rango prioritario (Q15 a Q250)
     badge_rango = ""
     if p_post and 15.0 <= p_post <= 250.0:
         badge_rango = "🎯 <b>[PRECIO DE OPORTUNIDAD]</b>\n"
@@ -75,33 +118,36 @@ def alerta(item_data, url_post, thumb=None):
         except Exception: pass
     return tg_send(msg) is not None
 
-def extraer_ia(texto_completo, img_url=None):
+def extraer_ia(texto_completo, img_urls=None):
     url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent"
     prompt = (
-        "Eres un experto en juegos de mesa y evaluador de precios en Guatemala.\n"
-        "Analiza esta publicación de Facebook Marketplace (incluye título, precio mostrado y descripción detallada).\n"
-        "Si hay una lista en la descripción (ej. 'Juego X - Q50, Juego Y - Q100'), extrae cada juego con su precio individual exacto.\n"
-        "Si hay una imagen, apóyate en las cajas visibles en la foto.\n\n"
+        "Eres un experto absoluto en juegos de mesa y evaluador de precios en Guatemala.\n"
+        "Analiza esta publicación de Facebook Marketplace (incluye título, precio mostrado, fotos y descripción detallada).\n"
+        "REGLA CRÍTICA DE EXHAUSTIVIDAD:\n"
+        "- Si hay imágenes de cajas apiladas, estantes o carrusel de fotos, inspecciona CADA UNA de las fotos y lista TODOS los juegos de mesa visibles sin omitir ninguno (aunque sean 20 o 30 juegos).\n"
+        "- Si hay una lista en la descripción (ej. 'Juego X - Q50, Juego Y - Q100'), extrae cada juego con su precio individual exacto.\n\n"
         f"Texto de la publicación:\n\"\"\"{texto_completo}\"\"\"\n\n"
         "Para cada juego de mesa encontrado, devuelve:\n"
         "1. 'juego': Nombre oficial del juego.\n"
-        "2. 'precio_post': Precio individual numérico en Quetzales (float). Si no tiene precio claro, pon null.\n"
-        "3. 'precio_estimado_post': Texto legible del precio (ej. 'Q75', 'Q350', 'Rango Q15 - Q200').\n"
+        "2. 'precio_post': Precio individual numérico en Quetzales (float). Si no tiene precio individual pon null.\n"
+        "3. 'precio_estimado_post': Texto legible del precio (ej. 'Q75', 'Q40', 'Rango Q15 - Q200', 'Ver en post').\n"
         "4. 'origen_precio': 'Lista en descripción', 'Precio directo del anuncio', o 'Estimado por rango'.\n"
         "5. 'rating_bgg': Calificación BGG aproximada (1 a 10).\n"
         "6. 'peso_bgg': Complejidad BGG (1 a 5).\n"
         "7. 'precio_amazon_usd': Precio aproximado nuevo en Amazon USA en DÓLARES (USD float).\n\n"
-        "Devuelve exclusivamente un JSON válido: "
-        '[{"juego": "Dorfromantik", "precio_post": 350.0, "precio_estimado_post": "Q350", "origen_precio": "Lista en descripción", "rating_bgg": 7.8, "peso_bgg": 1.7, "precio_amazon_usd": 39.99}]'
+        "Devuelve exclusivamente una lista JSON válida con TODOS los juegos encontrados:\n"
+        '[{"juego": "Nombre", "precio_post": 100.0, "precio_estimado_post": "Q100", "origen_precio": "Lista en descripción", "rating_bgg": 7.2, "peso_bgg": 2.1, "precio_amazon_usd": 24.99}]'
     )
     parts = [{"text": prompt}]
-    if img_url:
-        try:
-            req_img = urllib.request.Request(img_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req_img, timeout=5) as ir:
-                b64_img = base64.b64encode(ir.read()).decode("utf-8")
-                parts.append({"inline_data": {"mime_type": "image/jpeg", "data": b64_img}})
-        except Exception: pass
+    
+    if img_urls:
+        for u in img_urls[:5]:
+            try:
+                req_img = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req_img, timeout=6) as ir:
+                    b64_img = base64.b64encode(ir.read()).decode("utf-8")
+                    parts.append({"inline_data": {"mime_type": "image/jpeg", "data": b64_img}})
+            except Exception: pass
 
     payload = {"contents": [{"parts": parts}], "generationConfig": {"response_mime_type": "application/json"}}
     headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY}
@@ -109,7 +155,7 @@ def extraer_ia(texto_completo, img_url=None):
 
     for intento in range(4):
         try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with urllib.request.urlopen(req, timeout=25) as resp:
                 raw_txt = json.loads(resp.read().decode())["candidates"][0]["content"]["parts"][0]["text"]
                 return json.loads(raw_txt)
         except urllib.error.HTTPError as e:
@@ -125,13 +171,12 @@ def extraer_ia(texto_completo, img_url=None):
     return []
 
 def raspar():
-    # Reiniciamos a vacío para barrer todo el catálogo actual sin saltarse nada
     vistos = set()
     juegos_notificados_hoy = set()
     url_busqueda = "https://www.facebook.com/marketplace/guatemalacity/search/?query=juegos%20de%20mesa"
 
-    print("Iniciando barrido completo...", flush=True)
-    status_id = tg_send("📡 <b>Iniciando barrido completo de Marketplace en Guatemala...</b>\nBuscando todas las publicaciones actuales...")
+    print("Iniciando barrido exhaustivo con registro en Excel/CSV...", flush=True)
+    status_id = tg_send("📡 <b>Iniciando búsqueda en Marketplace Guatemala...</b>\nBuscando publicaciones y actualizando registro Excel/CSV...")
 
     with sync_playwright() as p:
         b = p.chromium.launch(headless=True)
@@ -157,7 +202,7 @@ def raspar():
 
         page = ctx.new_page()
         try:
-            print("Navegando a Marketplace...", flush=True)
+            print("Cargando Marketplace Ciudad de Guatemala...", flush=True)
             page.goto(url_busqueda, timeout=45000, wait_until="domcontentloaded")
             page.wait_for_timeout(3000)
 
@@ -168,33 +213,44 @@ def raspar():
                     if btn: btn.click(); page.wait_for_timeout(500)
             except Exception: pass
 
-            for _ in range(4):
-                page.evaluate("window.scrollBy(0, 1200)")
-                page.wait_for_timeout(1500)
+            for _ in range(8):
+                page.evaluate("window.scrollBy(0, 1500)")
+                page.wait_for_timeout(2000)
 
             enlaces = page.query_selector_all('a[href*="/marketplace/item/"], a[href*="/item/"]')
-            iids_pendientes = []
+            
+            items_encontrados = []
+            vistos_temp = set()
             for a in enlaces:
                 href = a.get_attribute("href") or ""
+                txt = a.inner_text().strip()
                 m = re.search(r"/item/(\d+)", href)
                 if m:
                     iid = m.group(1)
-                    if iid not in iids_pendientes:
-                        iids_pendientes.append(iid)
+                    if iid not in vistos_temp:
+                        vistos_temp.add(iid)
+                        es_lote = any(k in txt.lower() for k in ["lote", "liquidacion", "liquidación", "varios", "disponible", "remate", "combo", "coleccion", "colección", "gratis", "q1", "q 1"])
+                        items_encontrados.append({
+                            "iid": iid,
+                            "txt": txt,
+                            "prioridad": 1 if es_lote else 2
+                        })
 
-            total_a_revisar = len(iids_pendientes)
-            print(f"Total publicaciones encontradas: {total_a_revisar}. Se procesarán todas...", flush=True)
-            tg_edit(status_id, f"🔍 <b>Se encontraron {total_a_revisar} publicaciones en Guatemala.</b>\nIniciando análisis completo de todos los juegos...")
+            items_encontrados.sort(key=lambda x: x["prioridad"])
+            total_a_revisar = len(items_encontrados)
+            print(f"Total publicaciones encontradas: {total_a_revisar}. Priorizando lotes...", flush=True)
+            tg_edit(status_id, f"🔍 <b>Se encontraron {total_a_revisar} publicaciones en Guatemala.</b>\nAnalizando a fondo y guardando en Excel/CSV...")
 
             items_procesados = 0
-            for idx, iid in enumerate(iids_pendientes, 1):
+            for idx, item_info in enumerate(items_encontrados, 1):
+                iid = item_info["iid"]
                 post_url = f"https://www.facebook.com/marketplace/item/{iid}/"
-                print(f"[{idx}/{total_a_revisar}] Abriendo ID {iid}...", flush=True)
-                tg_edit(status_id, f"⏳ <b>Progreso: {idx}/{total_a_revisar} anuncios</b>\nLeyendo descripción completa y fotos...")
+                print(f"\n[{idx}/{total_a_revisar}] Abriendo ID {iid} ({item_info['txt'][:50]}...)", flush=True)
+                tg_edit(status_id, f"⏳ <b>Progreso: {idx}/{total_a_revisar} anuncios</b>\nLeyendo fotos y descripción...")
 
                 try:
                     page.goto(post_url, timeout=20000, wait_until="domcontentloaded")
-                    page.wait_for_timeout(2000)
+                    page.wait_for_timeout(2500)
 
                     try:
                         ver_mas = page.query_selector('div[role="main"] div[role="button"]:has-text("Ver más")')
@@ -204,11 +260,15 @@ def raspar():
                     main_el = page.query_selector('div[role="main"]')
                     texto_completo = main_el.inner_text() if main_el else page.inner_text("body")
                     
-                    img_elem = page.query_selector('div[role="main"] img')
-                    img_url = img_elem.get_attribute("src") if img_elem else None
+                    imgs = page.query_selector_all('div[role="main"] img')
+                    img_urls = []
+                    for im in imgs:
+                        src = im.get_attribute("src") or ""
+                        if "fbcdn.net" in src and "rsrc.php" not in src and src not in img_urls:
+                            img_urls.append(src)
 
-                    print(f"[{idx}/{total_a_revisar}] Consultando IA...", flush=True)
-                    items_ia = extraer_ia(texto_completo[:1500], img_url=img_url)
+                    print(f"[{idx}/{total_a_revisar}] Fotos en carrusel: {len(img_urls)}. Consultando IA...", flush=True)
+                    items_ia = extraer_ia(texto_completo[:2000], img_urls=img_urls)
 
                     if items_ia:
                         vistos.add(iid)
@@ -217,15 +277,18 @@ def raspar():
                         nom = item.get("juego", "").strip()
                         p = item.get("precio_post")
 
+                        # Guardar SIEMPRE en la base de datos CSV para tener el registro histórico
+                        registrar_en_csv(item, post_url, iid)
+
                         clave = re.sub(r'[^a-z0-9]', '', nom.lower())
                         if not clave or clave in juegos_notificados_hoy:
                             continue
 
-                        # Ahora envía TODOS los juegos encontrados (>= Q15 o identificados en foto)
                         if (p and p >= 15.0) or (not p and nom):
                             juegos_notificados_hoy.add(clave)
-                            print(f"🚨 Enviando alerta: {nom} (Q{p})", flush=True)
-                            alerta(item, post_url, img_url)
+                            print(f"🚨 Alerta: {nom}", flush=True)
+                            foto_alerta = img_urls[0] if img_urls else None
+                            alerta(item, post_url, foto_alerta)
                             items_procesados += 1
 
                 except Exception as ep:
@@ -233,7 +296,7 @@ def raspar():
 
                 time.sleep(16)
 
-            tg_edit(status_id, f"✅ <b>Barrido completo finalizado.</b>\nSe analizaron {total_a_revisar} publicaciones y se enviaron {items_procesados} alertas.")
+            tg_edit(status_id, f"✅ <b>Barrido exhaustivo finalizado.</b>\nSe analizaron {total_a_revisar} publicaciones, se registraron en el archivo Excel/CSV y se enviaron {items_procesados} alertas.")
             print(f"Finalizado con éxito. Total alertas: {items_procesados}", flush=True)
         except Exception as e:
             print(f"Error general: {e}", flush=True)
