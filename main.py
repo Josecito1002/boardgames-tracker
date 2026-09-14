@@ -6,26 +6,35 @@ CHAT_ID = os.environ.get("CHAT_ID") or "5171466462"
 GEMINI_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
 FB_COOKIES = os.environ.get("FB_COOKIES")
 
-def alerta(titulo, precio, rating, peso, precio_ref, url_post, thumb=None):
-    precio_str = f"Q{precio:.2f}" if precio and precio > 0 else "Ver en publicación"
+def alerta(item_data, url_post, thumb=None):
+    nombre = item_data.get("juego", "Juego desconocido")
+    p_post = item_data.get("precio_post")
+    p_estimado = item_data.get("precio_estimado_post") or ("Ver en publicación" if not p_post else f"Q{p_post:.2f}")
+    origen = item_data.get("origen_precio", "No especificado")
+    p_usd = item_data.get("precio_amazon_usd")
+    rating = item_data.get("rating_bgg")
+    peso = item_data.get("peso_bgg")
 
-    # Cálculo automático de ahorro si se detectó precio y hay referencia
+    amazon_str = ""
     ahorro_str = ""
-    if precio and precio > 0 and precio_ref and precio_ref > precio:
-        descuento = round(((precio_ref - precio) / precio_ref) * 100)
-        ahorro_str = f"🔥 <b>Ahorro estimado:</b> {descuento}% (Nuevo: ~Q{precio_ref:.0f})\n"
-    elif precio_ref:
-        ahorro_str = f"🏷️ <b>Precio nuevo aprox.:</b> ~Q{precio_ref:.0f}\n"
+    if p_usd and p_usd > 0:
+        equiv_gtq = p_usd * 7.80
+        amazon_str = f"🛒 <b>Precio nuevo en Amazon:</b> ~${p_usd:.2f} USD (~Q{equiv_gtq:.0f} GTQ)\n"
+        if p_post and p_post > 0 and equiv_gtq > p_post:
+            descuento = round(((equiv_gtq - p_post) / equiv_gtq) * 100)
+            ahorro_str = f"🔥 <b>Ahorro frente a Amazon:</b> {descuento}%\n"
 
-    bgg_str = f"⭐ <b>BGG Rating:</b> {rating}/10\n" if rating else ""
+    rating_str = f"⭐ <b>BGG Rating:</b> {rating}/10\n" if rating else ""
     peso_str = f"🧠 <b>Complejidad:</b> {peso}/5\n" if peso else ""
 
     msg = (
         f"🎲 <b>¡JUEGO DETECTADO EN GUATEMALA!</b> 🎲\n\n"
-        f"📦 <b>Juego:</b> {titulo}\n"
-        f"💰 <b>Precio Marketplace:</b> {precio_str}\n"
+        f"📦 <b>Juego:</b> {nombre}\n"
+        f"💰 <b>Precio Marketplace:</b> {p_estimado}\n"
+        f"📍 <b>Origen precio:</b> {origen}\n"
         f"{ahorro_str}"
-        f"{bgg_str}"
+        f"{amazon_str}"
+        f"{rating_str}"
         f"{peso_str}\n"
         f"🔗 <a href='{url_post}'>Ver en Facebook Marketplace</a>"
     )
@@ -33,27 +42,31 @@ def alerta(titulo, precio, rating, peso, precio_ref, url_post, thumb=None):
     def _post(ep, data):
         r = urllib.request.Request(ep, data=json.dumps(data).encode(), headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(r, timeout=10) as resp: return json.loads(resp.read())
+
     if thumb:
         try:
-            if _post(f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto", {"chat_id": CHAT_ID, "photo": thumb, "caption": msg, "parse_mode": "HTML"}).get("ok"): return True
+            if _post(f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto", {"chat_id": CHAT_ID, "photo": thumb, "caption": msg, "parse_mode": "HTML"}).get("ok"):
+                return True
         except Exception: pass
     return _post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", {"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML", "disable_web_page_preview": False}).get("ok", False)
 
 def extraer_ia(texto, img_url=None):
     url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent"
     prompt = (
-        "Eres un experto en juegos de mesa y evaluador de precios en Guatemala.\n"
-        "Analiza este anuncio de Facebook Marketplace en Guatemala. "
-        "Si hay imagen, identifica los juegos de mesa visibles en las cajas o portadas.\n"
-        "Para cada juego de mesa detectado:\n"
-        "1. Identifica el nombre del juego.\n"
-        "2. Extrae el precio de venta en Quetzales del anuncio (si dice Q1 o Gratis o no está claro, pon null).\n"
-        "3. Estima su calificacion promedio en BoardGameGeek (rating_bgg, escala 1 a 10).\n"
-        "4. Estima su complejidad en BGG (peso_bgg, escala 1 a 5).\n"
-        "5. Estima su precio aproximado nuevo en tiendas de Guatemala en Quetzales (precio_referencia_gtq, basado en retail MSRP/importacion).\n\n"
-        "Devuelve exclusivamente un JSON con formato: "
-        '[{"juego": "nombre", "precio": 150.0, "rating_bgg": 7.2, "peso_bgg": 2.3, "precio_referencia_gtq": 450.0}]\n'
-        f"Texto: {texto}"
+        "Eres un experto en juegos de mesa y evaluador de precios.\n"
+        "Analiza este anuncio de Facebook Marketplace en Guatemala.\n"
+        f"Texto del anuncio:\n\"\"\"{texto}\"\"\"\n\n"
+        "Si hay imagen adjunta, identifica TODOS los juegos de mesa visibles en las cajas, lomos o portadas (sin omitir ninguno).\n"
+        "Para cada juego encontrado, extrae o estima:\n"
+        "1. 'juego': Nombre oficial del juego.\n"
+        "2. 'precio_post': Precio individual numérico en Quetzales si se menciona en el texto para este juego (float). Si no, null.\n"
+        "3. 'precio_estimado_post': Texto legible del precio (ej. 'Q150', 'Rango Q15 - Q200', 'Gratis', 'Q1 señuelo').\n"
+        "4. 'origen_precio': De donde salio el precio (ej. 'Precio fijo en anuncio', 'Rango en descripcion', 'Sin precio claro en post').\n"
+        "5. 'rating_bgg': Calificacion aproximada en BoardGameGeek (1 a 10).\n"
+        "6. 'peso_bgg': Complejidad aproximada en BGG (1 a 5).\n"
+        "7. 'precio_amazon_usd': Precio de venta nuevo aproximado en Amazon USA en DOLARES (USD float, ej. 29.99).\n\n"
+        "Devuelve exclusivamente un JSON valido: "
+        '[{"juego": "Codenames", "precio_post": 150.0, "precio_estimado_post": "Q150", "origen_precio": "Precio fijo en anuncio", "rating_bgg": 7.6, "peso_bgg": 1.28, "precio_amazon_usd": 19.99}]'
     )
     parts = [{"text": prompt}]
     if img_url:
@@ -67,12 +80,23 @@ def extraer_ia(texto, img_url=None):
     payload = {"contents": [{"parts": parts}], "generationConfig": {"response_mime_type": "application/json"}}
     headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY}
     req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(json.loads(resp.read().decode())["candidates"][0]["content"]["parts"][0]["text"])
-    except Exception as e:
-        print(f"Error IA: {e}")
-        return []
+
+    for intento in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                raw_txt = json.loads(resp.read().decode())["candidates"][0]["content"]["parts"][0]["text"]
+                return json.loads(raw_txt)
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                print(f"⏳ Limite por minuto alcanzado (429). Pausa de 25s para recargar cuota (intento {intento+1}/3)...")
+                time.sleep(25)
+            else:
+                print(f"Error IA: {e}")
+                return []
+        except Exception as e:
+            print(f"Error IA: {e}")
+            return []
+    return []
 
 def raspar():
     vistos = set(json.load(open("vistos.json"))) if os.path.exists("vistos.json") else set()
@@ -113,16 +137,15 @@ def raspar():
                     if btn: btn.click(); page.wait_for_timeout(1000)
             except Exception: pass
 
-            for _ in range(2):
+            for _ in range(3):
                 page.evaluate("window.scrollBy(0, 1000)")
                 page.wait_for_timeout(2000)
 
             enlaces = page.query_selector_all('a[href*="/marketplace/item/"], a[href*="/item/"]')
-            print(f"Total publicaciones encontradas en Guatemala: {len(enlaces)}")
+            print(f"Total publicaciones visibles: {len(enlaces)}")
 
             items_procesados = 0
-            # Procesamos las 8 más recientes por ejecución
-            for a in enlaces[:8]:
+            for a in enlaces:
                 href = a.get_attribute("href") or ""
                 txt = a.inner_text().strip()
                 if not href or len(txt) < 5: continue
@@ -132,7 +155,6 @@ def raspar():
                 if not iid: continue
 
                 if iid in vistos: continue
-                vistos.add(iid)
                 post_url = f"https://www.facebook.com/marketplace/item/{iid}/"
 
                 img_elem = a.query_selector("img")
@@ -141,28 +163,26 @@ def raspar():
                 print(f"\nProcesando ID {iid}: {txt[:70]}...")
                 items_ia = extraer_ia(txt, img_url=img_url)
 
-                for item in items_ia:
-                    nombre = item.get("juego")
-                    precio = item.get("precio")
-                    rating = item.get("rating_bgg")
-                    peso = item.get("peso_bgg")
-                    precio_ref = item.get("precio_referencia_gtq")
+                if items_ia:
+                    vistos.add(iid)
 
-                    # Alerta si está entre Q15 y Q250, o si se identificó un juego en foto
-                    if (precio and 15.0 <= precio <= 250.0) or (not precio and nombre):
-                        print(f"🚨 ¡Enviando alerta a Telegram!: {nombre}")
-                        alerta(nombre, precio or 0.0, rating, peso, precio_ref, post_url, img_url)
+                for item in items_ia:
+                    p = item.get("precio_post")
+                    nom = item.get("juego")
+
+                    if (p and 15.0 <= p <= 250.0) or (not p and nom):
+                        print(f"🚨 ¡Enviando alerta a Telegram!: {nom}")
+                        alerta(item, post_url, img_url)
                         items_procesados += 1
 
-                # Pausa de 13s para mantenerse dentro del límite gratuito de 5 peticiones/minuto
-                time.sleep(13)
+                time.sleep(12)
 
-            print(f"\nTotal alertas enviadas: {items_procesados}")
+            print(f"\nTotal alertas enviadas en esta ejecución: {items_procesados}")
         except Exception as e: print("Error general:", e)
         finally: b.close()
 
     with open("vistos.json", "w") as f: json.dump(list(vistos), f, indent=2)
-    print("Finalizado.")
+    print("Historial vistos.json actualizado con éxito.")
 
 if __name__ == "__main__":
     raspar()
