@@ -1,6 +1,7 @@
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+import glob
 import json
 import os
 import re
@@ -8,9 +9,10 @@ import smtplib
 import ssl
 import time
 import urllib.request
+from PIL import Image
 from playwright.sync_api import sync_playwright
+import pytesseract
 
-# Variables de entorno leídas desde GitHub Secrets
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID") or "5171466462"
 FB_COOKIES = os.environ.get("FB_COOKIES")
@@ -18,7 +20,6 @@ FB_COOKIES = os.environ.get("FB_COOKIES")
 GMAIL_USER = os.environ.get("GMAIL_USER")
 GMAIL_APP_PASS = os.environ.get("GMAIL_APP_PASS")
 
-# Enlaces prioritarios a revisar primero
 URLS_PRIORITARIAS = [
     "https://www.facebook.com/share/1Ljt24Gr7u/",
     "https://www.facebook.com/share/1Hp3k4feUm/",
@@ -68,35 +69,37 @@ def es_mueble(texto):
   return False
 
 
-def tg_send(texto):
-  """Notificación ligera de estado por Telegram (opcional)."""
-  if not TG_TOKEN or not CHAT_ID:
-    return None
-  try:
-    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    payload = json.dumps({
-        "chat_id": CHAT_ID,
-        "text": texto,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=payload, headers={"Content-Type": "application/json"}
-    )
-    with urllib.request.urlopen(req, timeout=10) as r:
-      return json.loads(r.read()).get("result", {}).get("message_id")
-  except Exception as e:
-    print(f"Error tg_send: {e}", flush=True)
-    return None
+def limpiar_texto_marketplace(texto_crudo):
+  """Corta la basura de 'Sugerencias de hoy' y datos innecesarios."""
+  t = texto_crudo
+  for corte in [
+      "Sugerencias de hoy",
+      "Información del vendedor",
+      "Búsquedas relacionadas",
+  ]:
+    if corte in t:
+      t = t.split(corte)[0]
+  return t.strip()
 
 
-def enviar_publicacion_correo(iid, url_post, texto_post, ruta_img=None):
-  """Envía los detalles de la publicación y la captura a Gmail para su análisis."""
+def extraer_texto_de_imagenes(rutas_imgs):
+  """Aplica OCR local a las fotos para extraer listas escritas o precios."""
+  texto_acumulado = []
+  for idx, ruta in enumerate(rutas_imgs, 1):
+    try:
+      txt = pytesseract.image_to_string(Image.open(ruta), lang="spa").strip()
+      if len(txt) > 20:  # Solo incluir si contiene texto significativo
+        texto_acumulado.append(f"--- FOTO {idx} ---\n{txt}")
+    except Exception as e:
+      print(f"Aviso OCR en {ruta}: {e}", flush=True)
+  return "\n\n".join(texto_acumulado)
+
+
+def enviar_publicacion_correo(
+    iid, url_post, texto_post, rutas_imgs=[], texto_ocr=""
+):
   if not GMAIL_USER or not GMAIL_APP_PASS:
-    print(
-        "Aviso: GMAIL_USER o GMAIL_APP_PASS no configurados. Omitiendo envío.",
-        flush=True,
-    )
+    print("Aviso: GMAIL no configurado.", flush=True)
     return False
 
   try:
@@ -106,53 +109,94 @@ def enviar_publicacion_correo(iid, url_post, texto_post, ruta_img=None):
     msg["From"] = f"Marketplace Scraper <{GMAIL_USER}>"
     msg["To"] = GMAIL_USER
 
+    seccion_ocr = ""
+    if texto_ocr:
+      seccion_ocr = f"""
+            <h3>Texto detectado dentro de las imágenes (OCR):</h3>
+            <pre style="background: #eef4fb; padding: 12px; border-radius: 6px; white-space: pre-wrap; font-size: 14px;">{texto_ocr}</pre>
+            <hr>
+            """
+
     html_content = f"""
         <html>
           <body style="font-family: Arial, sans-serif; color: #222;">
-            <h2>🎲 Nueva publicación detectada: ID {iid}</h2>
-            <p><b>Enlace directo:</b> <a href="{url_post}">{url_post}</a></p>
+            <h2>🎲 Publicación detectada: ID {iid}</h2>
+            <p><b>Enlace:</b> <a href="{url_post}">{url_post}</a></p>
             <hr>
-            <h3>Texto y descripción de la publicación:</h3>
+            <h3>Descripción limpia de la publicación:</h3>
             <pre style="background: #f4f4f4; padding: 12px; border-radius: 6px; white-space: pre-wrap; font-size: 14px;">{texto_post}</pre>
+            <hr>
+            {seccion_ocr}
+            <h3>Fotos reales de la publicación ({len(rutas_imgs)} imágenes adjuntas):</h3>
         """
 
-    if ruta_img and os.path.exists(ruta_img):
-      html_content += """
-            <br>
-            <h3>Captura de pantalla:</h3>
-            <p><img src="cid:captura_marketplace" style="max-width: 650px; border: 1px solid #ccc; border-radius: 4px;"></p>
-            """
+    for i in range(len(rutas_imgs)):
+      html_content += f'<p><img src="cid:foto_{i}" style="max-width: 600px; border: 1px solid #ccc; border-radius: 4px; margin-bottom: 8px;"></p>'
 
-    html_content += """
-          </body>
-        </html>
-        """
+    html_content += "</body></html>"
 
     msg_alt = MIMEMultipart("alternative")
     msg.attach(msg_alt)
     msg_alt.attach(MIMEText(html_content, "html", "utf-8"))
 
-    if ruta_img and os.path.exists(ruta_img):
-      with open(ruta_img, "rb") as f:
-        img = MIMEImage(f.read())
-        img.add_header("Content-ID", "<captura_marketplace>")
-        img.add_header(
-            "Content-Disposition",
-            "inline",
-            filename=os.path.basename(ruta_img),
-        )
-        msg.attach(img)
+    # Adjuntar cada foto real
+    for i, ruta in enumerate(rutas_imgs):
+      if os.path.exists(ruta):
+        with open(ruta, "rb") as f:
+          img = MIMEImage(f.read())
+          img.add_header("Content-ID", f"<foto_{i}>")
+          img.add_header(
+              "Content-Disposition",
+              "inline",
+              filename=os.path.basename(ruta),
+          )
+          msg.attach(img)
 
     context = ssl.create_default_context()
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
       server.login(GMAIL_USER, GMAIL_APP_PASS)
       server.sendmail(GMAIL_USER, GMAIL_USER, msg.as_string())
 
-    print(f"📧 Correo enviado para ID {iid}.", flush=True)
+    print(f"📧 Correo enviado para ID {iid} con {len(rutas_imgs)} fotos.")
     return True
   except Exception as e:
     print(f"Error al enviar correo: {e}", flush=True)
     return False
+
+
+def descargar_fotos_reales(page, iid):
+  """Recorre el carrusel de Marketplace y descarga las imágenes originales."""
+  rutas = []
+  urls_vistas = set()
+
+  for idx in range(8):  # Hasta 8 fotos por publicación
+    try:
+      # Buscar la imagen principal activa en el visor
+      img_el = page.query_selector(
+          'div[role="main"] div[data-visualcompletion="media-vc-image"] img'
+      ) or page.query_selector('div[role="main"] img')
+      if img_el:
+        src = img_el.get_attribute("src")
+        if src and src.startswith("http") and src not in urls_vistas:
+          urls_vistas.add(src)
+          ruta_archivo = f"foto_{iid}_{idx+1}.jpg"
+          urllib.request.urlretrieve(src, ruta_archivo)
+          rutas.append(ruta_archivo)
+
+      # Intentar avanzar a la siguiente foto del carrusel
+      btn_next = page.query_selector(
+          'div[role="main"] [aria-label="Siguiente"], div[role="main"]'
+          ' [aria-label="Next"], div[role="main"] [aria-label="Foto siguiente"]'
+      )
+      if btn_next and btn_next.is_visible():
+        btn_next.click()
+        page.wait_for_timeout(600)
+      else:
+        break
+    except Exception:
+      break
+
+  return rutas
 
 
 def raspar():
@@ -165,10 +209,6 @@ def raspar():
       pass
 
   url_busqueda = "https://www.facebook.com/marketplace/mixco-guatemala/search/?query=juegos%20de%20mesa"
-  tg_send(
-      "📡 <b>Iniciando búsqueda en Marketplace...</b>\nExtrayendo publicaciones"
-      " hacia Gmail."
-  )
 
   with sync_playwright() as p:
     b = p.chromium.launch(headless=True)
@@ -210,7 +250,6 @@ def raspar():
         print("Error cookies:", e, flush=True)
 
     page = ctx.new_page()
-    items_enviados = 0
 
     # 1. PUBLICACIONES PRIORITARIAS
     for idx, url_prio in enumerate(URLS_PRIORITARIAS, 1):
@@ -233,51 +272,40 @@ def raspar():
           )
           if ver_mas:
             ver_mas.click()
-            page.wait_for_timeout(500)
+            page.wait_for_timeout(400)
         except Exception:
           pass
 
         main_el = page.query_selector('div[role="main"]')
-        texto_completo = (
+        texto_crudo = (
             main_el.inner_text() if main_el else page.inner_text("body")
         )
+        texto_limpio = limpiar_texto_marketplace(texto_crudo)
 
-        ruta_captura = f"captura_{iid}.png"
-        page.screenshot(path=ruta_captura)
+        # Descargar fotos reales del carrusel y aplicar OCR
+        fotos = descargar_fotos_reales(page, iid)
+        texto_ocr = extraer_texto_de_imagenes(fotos) if fotos else ""
 
         if enviar_publicacion_correo(
-            iid, real_url, texto_completo, ruta_captura
+            iid, real_url, texto_limpio, fotos, texto_ocr
         ):
           vistos.add(iid)
-          items_enviados += 1
 
-        if os.path.exists(ruta_captura):
-          os.remove(ruta_captura)
+        # Limpiar archivos locales
+        for f in fotos:
+          if os.path.exists(f):
+            os.remove(f)
         time.sleep(5)
       except Exception as e_prio:
         print(
             f"Error en publicación prioritaria {url_prio}: {e_prio}", flush=True
         )
 
-    # 2. BARRIDO GENERAL EN MARKETPLACE
+    # 2. BARRIDO GENERAL
     try:
       print("\nCargando Marketplace...", flush=True)
       page.goto(url_busqueda, timeout=45000, wait_until="domcontentloaded")
       page.wait_for_timeout(3000)
-
-      try:
-        page.keyboard.press("Escape")
-        for s in [
-            '[aria-label="Cerrar"]',
-            '[aria-label="Close"]',
-            'div[role="button"]:has-text("Ahora no")',
-        ]:
-          btn = page.query_selector(s)
-          if btn:
-            btn.click()
-            page.wait_for_timeout(400)
-      except Exception:
-        pass
 
       for _ in range(5):
         page.evaluate("window.scrollBy(0, 1500)")
@@ -300,12 +328,9 @@ def raspar():
           ):
             iids_pendientes.append(iid)
 
-      total_a_revisar = min(len(iids_pendientes), 15)
-      print(f"Publicaciones a procesar: {total_a_revisar}...", flush=True)
-
-      for idx, iid in enumerate(iids_pendientes[:total_a_revisar], 1):
+      for idx, iid in enumerate(iids_pendientes[:10], 1):
         post_url = f"https://www.facebook.com/marketplace/item/{iid}/"
-        print(f"[{idx}/{total_a_revisar}] Abriendo ID {iid}...", flush=True)
+        print(f"[{idx}] Abriendo ID {iid}...", flush=True)
 
         try:
           page.goto(post_url, timeout=20000, wait_until="domcontentloaded")
@@ -322,37 +347,32 @@ def raspar():
             pass
 
           main_el = page.query_selector('div[role="main"]')
-          texto_completo = (
+          texto_crudo = (
               main_el.inner_text() if main_el else page.inner_text("body")
           )
 
-          if es_mueble(texto_completo):
+          if es_mueble(texto_crudo):
             vistos.add(iid)
             continue
 
-          ruta_captura = f"captura_{iid}.png"
-          page.screenshot(path=ruta_captura)
+          texto_limpio = limpiar_texto_marketplace(texto_crudo)
+          fotos = descargar_fotos_reales(page, iid)
+          texto_ocr = extraer_texto_de_imagenes(fotos) if fotos else ""
 
           if enviar_publicacion_correo(
-              iid, post_url, texto_completo, ruta_captura
+              iid, post_url, texto_limpio, fotos, texto_ocr
           ):
             vistos.add(iid)
-            items_enviados += 1
 
-          if os.path.exists(ruta_captura):
-            os.remove(ruta_captura)
+          for f in fotos:
+            if os.path.exists(f):
+              os.remove(f)
         except Exception as ep:
-          print(f"Error procesando ID {iid}: {ep}", flush=True)
+          print(f"Error en ID {iid}: {ep}", flush=True)
 
         time.sleep(5)
-
-      tg_send(
-          f"✅ <b>Barrido completado.</b>\nSe enviaron {items_enviados}"
-          " publicaciones a Gmail para registro en Google Sheets."
-      )
     except Exception as e:
-      print(f"Error general: {e}", flush=True)
-      tg_send(f"❌ <b>Error:</b> {e}")
+      print(f"Error en barrido: {e}", flush=True)
     finally:
       b.close()
 
