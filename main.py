@@ -1,6 +1,7 @@
 import os, json, re, urllib.request, urllib.parse, xml.etree.ElementTree as ET
 from playwright.sync_api import sync_playwright
 
+# Variables de entorno
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
@@ -63,7 +64,7 @@ def extraer_ia(texto):
 
 def raspar():
     vistos = set(json.load(open("vistos.json"))) if os.path.exists("vistos.json") else set()
-    url = "https://www.facebook.com/marketplace/guatemalacity/search?query=juegos%20de%20mesa&sortBy=creation_time_descend"
+    url = "https://www.facebook.com/marketplace/guatemalacity/search/?query=juegos%20de%20mesa"
     with sync_playwright() as p:
         b = p.chromium.launch(headless=True)
         ctx = b.new_context(
@@ -88,7 +89,7 @@ def raspar():
 
         page = ctx.new_page()
         try:
-            print("Navegando a Marketplace Guatemala...")
+            print("Navegando a Marketplace Ciudad de Guatemala...")
             page.goto(url, timeout=45000)
             page.wait_for_timeout(5000)
             try:
@@ -98,8 +99,18 @@ def raspar():
                     if btn: btn.click(); page.wait_for_timeout(1000)
             except Exception: pass
             for _ in range(2): page.evaluate("window.scrollBy(0, 800)"); page.wait_for_timeout(2000)
+
+            print(f"URL real: {page.url} | Titulo: {page.title()}")
+            print("Texto visible:", page.inner_text("body")[:250].replace("\n", " "))
+
             enlaces = page.query_selector_all('a[href*="/item/"], a[href*="/marketplace/item/"]')
-            print(f"Se encontraron {len(enlaces)} publicaciones.")
+            print(f"Se encontraron {len(enlaces)} publicaciones con /item/.")
+
+            links_mp = [a.get_attribute("href") for a in page.query_selector_all("a") if "/marketplace/" in (a.get_attribute("href") or "")]
+            print(f"Total enlaces de marketplace en pagina: {len(links_mp)}")
+            if links_mp:
+                print(f"Ejemplo de enlace marketplace: {links_mp[0]}")
+
             for a in enlaces[:15]:
                 href = a.get_attribute("href") or ""
                 if "/item/" not in href: continue
@@ -124,4 +135,4 @@ def raspar():
 
 if __name__ == "__main__":
     raspar()
-                                    
+            
