@@ -6,13 +6,16 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from playwright.sync_api import sync_playwright
 
-# Variables de entorno
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN") or "8578108762:AAHw2jIcKs8L8X44DxIQ7tjZTgscN2rjYKI"
-CHAT_ID = os.environ.get("CHAT_ID") or "5171466462"
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or "AQ.Ab8RN6JkWi0bJzcYFn6B2WZyIiluwrbrun7NfjZAT-tcurxdbA"
+# ==========================================
+# CONFIGURACIÓN
+# ==========================================
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID = os.environ.get("CHAT_ID")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL = "gemini-3.6-flash"
 FB_COOKIES = os.environ.get("FB_COOKIES")
 
+# 1. Enviar alerta a Telegram
 def enviar_alerta(titulo, precio, rating_bgg, rank_bgg, peso_bgg, url_post, thumbnail=None):
     mensaje = (
         f"🎲 <b>¡JUEGO DETECTADO EN MARKETPLACE!</b> 🎲\n\n"
@@ -38,6 +41,7 @@ def enviar_alerta(titulo, precio, rating_bgg, rank_bgg, peso_bgg, url_post, thum
 
     return _post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", {"chat_id": CHAT_ID, "text": mensaje, "parse_mode": "HTML", "disable_web_page_preview": False}).get("ok", False)
 
+# 2. Consultar BoardGameGeek
 def consultar_bgg(nombre_juego):
     try:
         url_search = f"https://boardgamegeek.com/xmlapi2/search?{urllib.parse.urlencode({'query': nombre_juego, 'type': 'boardgame'})}"
@@ -87,6 +91,7 @@ def consultar_bgg(nombre_juego):
         print(f"Error BGG ({nombre_juego}): {e}")
         return None
 
+# 3. Extraer juegos con Gemini 3.6 Flash
 def extraer_juegos_con_ia(texto):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     prompt = (
@@ -108,6 +113,7 @@ def extraer_juegos_con_ia(texto):
         print(f"Error IA: {e}")
         return []
 
+# 4. Historial de publicaciones vistas
 def cargar_posts_vistos(db_path="vistos.json"):
     if os.path.exists(db_path):
         with open(db_path, "r", encoding="utf-8") as f:
@@ -118,18 +124,23 @@ def guardar_posts_vistos(vistos, db_path="vistos.json"):
     with open(db_path, "w", encoding="utf-8") as f:
         json.dump(list(vistos), f, indent=2)
 
+# 5. Ejecución con Playwright en Ciudad de Guatemala
 def raspar_marketplace():
     vistos = cargar_posts_vistos()
     nuevos_encontrados = 0
 
-    url_busqueda = "https://www.facebook.com/marketplace/guatemala/search?query=juegos%20de%20mesa&sortBy=creation_time_descend"
+    # Ubicación oficial de Ciudad de Guatemala
+    url_busqueda = "https://www.facebook.com/marketplace/guatemalacity/search?query=juegos%20de%20mesa&sortBy=creation_time_descend"
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
+        # Geolocalización fija en Guatemala para evitar que salgan anuncios de EE. UU.
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             viewport={"width": 1280, "height": 900},
-            locale="es-GT"
+            locale="es-GT",
+            geolocation={"latitude": 14.6349, "longitude": -90.5069},
+            permissions=["geolocation"]
         )
 
         if FB_COOKIES:
@@ -161,13 +172,13 @@ def raspar_marketplace():
                 print(f"⚠️ Error al inyectar cookies: {e}")
 
         page = context.new_page()
-        print("Navegando a Marketplace...")
+        print("Navegando a Marketplace Ciudad de Guatemala...")
 
         try:
             page.goto(url_busqueda, timeout=45000)
             page.wait_for_timeout(5000)
 
-            # Cerrar posibles modales de 'Ahora no' o avisos de Facebook
+            # Cerrar modales si aparecen
             try:
                 page.keyboard.press("Escape")
                 for selector in [
@@ -192,14 +203,8 @@ def raspar_marketplace():
 
             print(f"Página: '{page.title()}' | URL: {page.url}")
 
-            # Buscar todas las publicaciones en Marketplace
             enlaces = page.query_selector_all('a[href*="/item/"], a[href*="/marketplace/item/"]')
             print(f"Se encontraron {len(enlaces)} publicaciones visibles.")
-
-            # Si sigue en 0, imprimimos el texto para ver qué muestra la pantalla
-            if not enlaces:
-                texto_body = page.inner_text("body")[:350]
-                print("Texto visible en la página:\n", texto_body)
 
             for enlace in enlaces[:15]:
                 href = enlace.get_attribute("href")
@@ -221,34 +226,5 @@ def raspar_marketplace():
 
                 for item in items_detectados:
                     nombre = item.get("juego")
-                    precio = item.get("precio")
-
-                    # Rango de alerta: Q15 a Q250
-                    if precio and 15.0 <= precio <= 250.0:
-                        bgg = consultar_bgg(nombre)
-                        if bgg:
-                            print(f"🚨 Enviando alerta: {bgg['nombre']} a Q{precio}")
-                            enviar_alerta(
-                                titulo=bgg["nombre"],
-                                precio=precio,
-                                rating_bgg=bgg["rating"],
-                                rank_bgg=bgg["rank"],
-                                peso_bgg=bgg["weight"],
-                                url_post=post_url,
-                                thumbnail=bgg["thumbnail"]
-                            )
-                            nuevos_encontrados += 1
-                    else:
-                        print(f"Descartado '{nombre}' (precio: Q{precio})")
-
-        except Exception as e:
-            print(f"Error durante el scraping: {e}")
-        finally:
-            browser.close()
-
-    guardar_posts_vistos(vistos)
-    print(f"\nFinalizado. {nuevos_encontrados} alertas enviadas.")
-
-if __name__ == "__main__":
-    raspar_marketplace()
-    
+                    precio
+        
