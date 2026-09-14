@@ -11,9 +11,21 @@ FB_COOKIES = os.environ.get("FB_COOKIES")
 CSV_FILE = "historial_juegos.csv"
 CAMPOS_CSV = [
     "Fecha", "Juego", "Precio Marketplace (GTQ)", "Precio Texto", "Origen Precio",
-    "Oportunidad (<= Q250)", "Precio Amazon (USD)", "Equivalente Amazon (GTQ)",
+    "Buena Oferta (>= 35% ahorro)", "Precio Amazon (USD)", "Equivalente Amazon (GTQ)",
     "Ahorro Estimado (%)", "BGG Rating", "BGG Complejidad", "ID Publicacion", "Enlace Marketplace"
 ]
+
+PALABRAS_MUEBLES = [
+    "comedor", "tocador", "cabecera", "mesa de noche", "mesas de noche", "mesa de centro",
+    "silla", "sillas", "mueble", "muebles", "sala", "ropero", "closet", "cocina"
+]
+
+def es_mueble(texto):
+    t = texto.lower()
+    if any(m in t for m in PALABRAS_MUEBLES):
+        if not any(j in t for j in ["catan", "cartas", "tablero", "bgg", "hasbro", "devir", "monopoly", "carcassonne", "clue", "basta", "splendor", "dixit", "risk"]):
+            return True
+    return False
 
 def registrar_en_csv(item_data, post_url, iid):
     archivo_nuevo = not os.path.exists(CSV_FILE)
@@ -27,11 +39,13 @@ def registrar_en_csv(item_data, post_url, iid):
             p_usd = item_data.get("precio_amazon_usd")
             equiv_gtq = round(p_usd * 7.80, 2) if (p_usd and p_usd > 0) else None
             
-            ahorro = None
+            ahorro_num = None
+            ahorro_str = None
             if p_post and p_post > 0 and equiv_gtq and equiv_gtq > p_post:
-                ahorro = f"{round(((equiv_gtq - p_post) / equiv_gtq) * 100)}%"
+                ahorro_num = round(((equiv_gtq - p_post) / equiv_gtq) * 100)
+                ahorro_str = f"{ahorro_num}%"
 
-            es_oportunidad = "SÍ" if (p_post and 15.0 <= p_post <= 250.0) else "NO"
+            es_buena_oferta = "SÍ" if (ahorro_num is not None and ahorro_num >= 35) else "NO"
 
             writer.writerow({
                 "Fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -39,10 +53,10 @@ def registrar_en_csv(item_data, post_url, iid):
                 "Precio Marketplace (GTQ)": p_post or "",
                 "Precio Texto": item_data.get("precio_estimado_post", ""),
                 "Origen Precio": item_data.get("origen_precio", ""),
-                "Oportunidad (<= Q250)": es_oportunidad,
+                "Buena Oferta (>= 35% ahorro)": es_buena_oferta,
                 "Precio Amazon (USD)": p_usd or "",
                 "Equivalente Amazon (GTQ)": equiv_gtq or "",
-                "Ahorro Estimado (%)": ahorro or "",
+                "Ahorro Estimado (%)": ahorro_str or "",
                 "BGG Rating": item_data.get("rating_bgg", ""),
                 "BGG Complejidad": item_data.get("peso_bgg", ""),
                 "ID Publicacion": iid,
@@ -80,25 +94,28 @@ def alerta(item_data, url_post, thumb=None):
     rating = item_data.get("rating_bgg")
     peso = item_data.get("peso_bgg")
 
-    badge_rango = ""
-    if p_post and 15.0 <= p_post <= 250.0:
-        badge_rango = "🎯 <b>[PRECIO DE OPORTUNIDAD]</b>\n"
-
     amazon_str = ""
     ahorro_str = ""
+    badge_oferta = ""
+
     if p_usd and p_usd > 0:
         equiv_gtq = p_usd * 7.80
         amazon_str = f"🛒 <b>Precio nuevo en Amazon:</b> ~${p_usd:.2f} USD (~Q{equiv_gtq:.0f} GTQ)\n"
-        if p_post and p_post > 0 and equiv_gtq > p_post:
-            descuento = round(((equiv_gtq - p_post) / equiv_gtq) * 100)
-            ahorro_str = f"🔥 <b>Ahorro frente a Amazon:</b> {descuento}%\n"
+        if p_post and p_post > 0:
+            if equiv_gtq > p_post:
+                descuento = round(((equiv_gtq - p_post) / equiv_gtq) * 100)
+                ahorro_str = f"🔥 <b>Ahorro frente a Amazon:</b> {descuento}%\n"
+                if descuento >= 35:
+                    badge_oferta = f"🎯 <b>[BUENA OFERTA]</b> ({descuento}% más barato que Amazon)\n"
+            else:
+                ahorro_str = "⚠️ <b>Nota:</b> Más caro que en Amazon nuevo\n"
 
     rating_str = f"⭐ <b>BGG Rating:</b> {rating}/10\n" if rating else ""
     peso_str = f"🧠 <b>Complejidad:</b> {peso}/5\n" if peso else ""
 
     msg = (
         f"🎲 <b>{nombre.upper()}</b>\n\n"
-        f"{badge_rango}"
+        f"{badge_oferta}"
         f"💰 <b>Precio Marketplace:</b> {p_estimado}\n"
         f"📍 <b>Origen precio:</b> {origen}\n"
         f"{ahorro_str}"
@@ -123,9 +140,8 @@ def extraer_ia(texto_completo, img_urls=None):
     prompt = (
         "Eres un experto absoluto en juegos de mesa y evaluador de precios en Guatemala.\n"
         "Analiza esta publicación de Facebook Marketplace (incluye título, precio mostrado, fotos y descripción detallada).\n"
-        "REGLA CRÍTICA DE EXHAUSTIVIDAD:\n"
-        "- Si hay imágenes de cajas apiladas, estantes o carrusel de fotos, inspecciona CADA UNA de las fotos y lista TODOS los juegos de mesa visibles sin omitir ninguno (aunque sean 20 o 30 juegos).\n"
-        "- Si hay una lista en la descripción (ej. 'Juego X - Q50, Juego Y - Q100'), extrae cada juego con su precio individual exacto.\n\n"
+        "FILTRO DE MUEBLES: Si la publicación es sobre MUEBLES (mesas de comedor, sillas, tocadores, mesas de noche, salas), IGNÓRALA y devuelve: [].\n"
+        "EXHAUSTIVIDAD DE JUEGOS: Si es un anuncio de juegos de mesa, inspecciona las fotos y la descripción y lista TODOS los juegos de mesa encontrados sin omitir ninguno.\n\n"
         f"Texto de la publicación:\n\"\"\"{texto_completo}\"\"\"\n\n"
         "Para cada juego de mesa encontrado, devuelve:\n"
         "1. 'juego': Nombre oficial del juego.\n"
@@ -141,7 +157,7 @@ def extraer_ia(texto_completo, img_urls=None):
     parts = [{"text": prompt}]
     
     if img_urls:
-        for u in img_urls[:5]:
+        for u in img_urls[:2]:
             try:
                 req_img = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
                 with urllib.request.urlopen(req_img, timeout=6) as ir:
@@ -155,13 +171,13 @@ def extraer_ia(texto_completo, img_urls=None):
 
     for intento in range(4):
         try:
-            with urllib.request.urlopen(req, timeout=25) as resp:
+            with urllib.request.urlopen(req, timeout=20) as resp:
                 raw_txt = json.loads(resp.read().decode())["candidates"][0]["content"]["parts"][0]["text"]
                 return json.loads(raw_txt)
         except urllib.error.HTTPError as e:
             if e.code == 429:
-                print(f"⏳ Límite 429. Pausa de 35s para recargar cuota (intento {intento+1}/4)...", flush=True)
-                time.sleep(35)
+                print(f"⏳ Límite 429. Pausa de 30s (intento {intento+1}/4)...", flush=True)
+                time.sleep(30)
             else:
                 print(f"Error IA: {e}", flush=True)
                 return []
@@ -173,17 +189,19 @@ def extraer_ia(texto_completo, img_urls=None):
 def raspar():
     vistos = set()
     juegos_notificados_hoy = set()
-    url_busqueda = "https://www.facebook.com/marketplace/guatemalacity/search/?query=juegos%20de%20mesa"
+    
+    # Búsqueda abierta centrada en Mixco (cubre Mixco, Guatemala, Villa Nueva, San Lucas, Petapa)
+    url_busqueda = "https://www.facebook.com/marketplace/mixco-guatemala/search/?query=juegos%20de%20mesa"
 
-    print("Iniciando barrido exhaustivo con registro en Excel/CSV...", flush=True)
-    status_id = tg_send("📡 <b>Iniciando búsqueda en Marketplace Guatemala...</b>\nBuscando publicaciones y actualizando registro Excel/CSV...")
+    print("Iniciando búsqueda centrada en Mixco...", flush=True)
+    status_id = tg_send("📡 <b>Iniciando búsqueda en Marketplace (Mixco y alrededores)...</b>\nBuscando lotes y colecciones de juegos de mesa...")
 
     with sync_playwright() as p:
         b = p.chromium.launch(headless=True)
         ctx = b.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             viewport={"width": 1280, "height": 900}, locale="es-GT",
-            geolocation={"latitude": 14.6349, "longitude": -90.5069}, permissions=["geolocation"]
+            geolocation={"latitude": 14.6333, "longitude": -90.6064}, permissions=["geolocation"]
         )
         if FB_COOKIES:
             try:
@@ -202,7 +220,7 @@ def raspar():
 
         page = ctx.new_page()
         try:
-            print("Cargando Marketplace Ciudad de Guatemala...", flush=True)
+            print("Cargando Marketplace Mixco...", flush=True)
             page.goto(url_busqueda, timeout=45000, wait_until="domcontentloaded")
             page.wait_for_timeout(3000)
 
@@ -213,9 +231,9 @@ def raspar():
                     if btn: btn.click(); page.wait_for_timeout(500)
             except Exception: pass
 
-            for _ in range(8):
+            for _ in range(6):
                 page.evaluate("window.scrollBy(0, 1500)")
-                page.wait_for_timeout(2000)
+                page.wait_for_timeout(1800)
 
             enlaces = page.query_selector_all('a[href*="/marketplace/item/"], a[href*="/item/"]')
             
@@ -229,7 +247,13 @@ def raspar():
                     iid = m.group(1)
                     if iid not in vistos_temp:
                         vistos_temp.add(iid)
-                        es_lote = any(k in txt.lower() for k in ["lote", "liquidacion", "liquidación", "varios", "disponible", "remate", "combo", "coleccion", "colección", "gratis", "q1", "q 1"])
+                        # Descarte previo inmediato si el título dice comedor o muebles
+                        if es_mueble(txt):
+                            print(f"Descartando mueble: {txt[:40]}")
+                            continue
+
+                        # Prioridad 1 a lotes grandes, liquidaciones y colecciones
+                        es_lote = any(k in txt.lower() for k in ["lote", "liquidacion", "liquidación", "varios", "disponible", "remate", "combo", "coleccion", "colección", "gratis", "q1", "q 1", "super venta"])
                         items_encontrados.append({
                             "iid": iid,
                             "txt": txt,
@@ -238,19 +262,19 @@ def raspar():
 
             items_encontrados.sort(key=lambda x: x["prioridad"])
             total_a_revisar = len(items_encontrados)
-            print(f"Total publicaciones encontradas: {total_a_revisar}. Priorizando lotes...", flush=True)
-            tg_edit(status_id, f"🔍 <b>Se encontraron {total_a_revisar} publicaciones en Guatemala.</b>\nAnalizando a fondo y guardando en Excel/CSV...")
+            print(f"Total publicaciones válidas encontradas: {total_a_revisar}. Priorizando lotes...", flush=True)
+            tg_edit(status_id, f"🔍 <b>Se encontraron {total_a_revisar} publicaciones de juegos en Mixco y alrededores.</b>\nPriorizando lotes grandes y colecciones...")
 
             items_procesados = 0
             for idx, item_info in enumerate(items_encontrados, 1):
                 iid = item_info["iid"]
                 post_url = f"https://www.facebook.com/marketplace/item/{iid}/"
                 print(f"\n[{idx}/{total_a_revisar}] Abriendo ID {iid} ({item_info['txt'][:50]}...)", flush=True)
-                tg_edit(status_id, f"⏳ <b>Progreso: {idx}/{total_a_revisar} anuncios</b>\nLeyendo fotos y descripción...")
+                tg_edit(status_id, f"⏳ <b>Progreso: {idx}/{total_a_revisar} anuncios</b>\nAnalizando contenido y fotos...")
 
                 try:
                     page.goto(post_url, timeout=20000, wait_until="domcontentloaded")
-                    page.wait_for_timeout(2500)
+                    page.wait_for_timeout(2000)
 
                     try:
                         ver_mas = page.query_selector('div[role="main"] div[role="button"]:has-text("Ver más")')
@@ -260,6 +284,11 @@ def raspar():
                     main_el = page.query_selector('div[role="main"]')
                     texto_completo = main_el.inner_text() if main_el else page.inner_text("body")
                     
+                    if es_mueble(texto_completo):
+                        print(f"[{idx}/{total_a_revisar}] Descartado en detalle por ser mueble.")
+                        vistos.add(iid)
+                        continue
+
                     imgs = page.query_selector_all('div[role="main"] img')
                     img_urls = []
                     for im in imgs:
@@ -267,7 +296,7 @@ def raspar():
                         if "fbcdn.net" in src and "rsrc.php" not in src and src not in img_urls:
                             img_urls.append(src)
 
-                    print(f"[{idx}/{total_a_revisar}] Fotos en carrusel: {len(img_urls)}. Consultando IA...", flush=True)
+                    print(f"[{idx}/{total_a_revisar}] Analizando con IA...", flush=True)
                     items_ia = extraer_ia(texto_completo[:2000], img_urls=img_urls)
 
                     if items_ia:
@@ -277,7 +306,6 @@ def raspar():
                         nom = item.get("juego", "").strip()
                         p = item.get("precio_post")
 
-                        # Guardar SIEMPRE en la base de datos CSV para tener el registro histórico
                         registrar_en_csv(item, post_url, iid)
 
                         clave = re.sub(r'[^a-z0-9]', '', nom.lower())
@@ -294,9 +322,9 @@ def raspar():
                 except Exception as ep:
                     print(f"Error al procesar ID {iid}: {ep}", flush=True)
 
-                time.sleep(16)
+                time.sleep(12)
 
-            tg_edit(status_id, f"✅ <b>Barrido exhaustivo finalizado.</b>\nSe analizaron {total_a_revisar} publicaciones, se registraron en el archivo Excel/CSV y se enviaron {items_procesados} alertas.")
+            tg_edit(status_id, f"✅ <b>Barrido finalizado.</b>\nSe analizaron {total_a_revisar} publicaciones, se guardaron en Excel/CSV y se enviaron {items_procesados} alertas.")
             print(f"Finalizado con éxito. Total alertas: {items_procesados}", flush=True)
         except Exception as e:
             print(f"Error general: {e}", flush=True)
