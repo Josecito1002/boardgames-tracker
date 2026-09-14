@@ -92,6 +92,18 @@ WISHLIST = [
 ]
 
 
+def enmascarar_digitos(valor):
+    """Sustituye cada dígito por '#' antes de imprimir algo en el log.
+
+    GitHub Actions enmascara cualquier texto que coincida con un secret
+    (CHAT_ID, por ejemplo) y lo reemplaza por '***'. El ID numérico de la
+    cuenta de Facebook aparece en casi todos los hrefs del grupo, así que
+    cualquier ruta impresa tal cual puede terminar tapada. Para el
+    diagnóstico solo necesitamos el PATRÓN de la ruta, no los números, así
+    que los reemplazamos y así ningún ID puede coincidir con un secret.
+    """
+    return re.sub(r"\d", "#", str(valor))
+
 def evaluar_alerta_telegram(texto):
     """Decide si vale la pena notificar por Telegram.
 
@@ -465,26 +477,72 @@ def raspar_grupo(page, url_grupo, vistos, max_posts=5):
         )
         print(f"   Links con /posts|permalink| detectados: {len(enlaces)}", flush=True)
 
-        # Diagnóstico: si no encontramos links con el patrón esperado, mostrar
-        # solo la RUTA (sin query params) de los hrefs reales que sí existen,
-        # para descubrir el formato actual sin arriesgar que algún número de
-        # tracking en la query coincida por casualidad con un secret y GitHub
-        # lo enmascare como "***".
-        if len(enlaces) == 0 and articulos:
-            print("   🔎 Rutas reales encontradas en los primeros bloques (sin query params):", flush=True)
-            for i, art in enumerate(articulos[:3], 1):
-                hrefs_crudos = [
-                    a.get_attribute("href")
-                    for a in art.query_selector_all("a[href]")
-                ]
-                rutas = []
-                for h in hrefs_crudos:
-                    if not h:
-                        continue
-                    ruta = urllib.parse.urlparse(h).path
-                    if ruta and ruta not in rutas:
-                        rutas.append(ruta)
-                print(f"      Bloque {i}: {rutas[:15]}", flush=True)
+        # Diagnóstico: si no encontramos links con el patrón esperado,
+        # mostrar qué rutas SÍ existen para descubrir el formato actual.
+        # Todo se imprime con los dígitos sustituidos por '#'
+        # (enmascarar_digitos) porque el ID numérico de la cuenta aparece en
+        # muchos hrefs y coincide con un secret, así que GitHub lo taparía
+        # con "***" y perderíamos el patrón, que es lo único que necesitamos.
+        if len(enlaces) == 0:
+            # 1) Rutas dentro de los bloques detectados. Ojo: los primeros
+            #    div[role=article] suelen ser el carrusel de "Destacados" y no
+            #    publicaciones reales, por eso más abajo revisamos también
+            #    TODOS los links de la página.
+            if articulos:
+                print(
+                    "   🔎 Rutas dentro de los bloques detectados"
+                    " (dígitos enmascarados con #):",
+                    flush=True,
+                )
+                for i, art in enumerate(articulos[:3], 1):
+                    rutas = []
+                    for a in art.query_selector_all("a[href]"):
+                        h = a.get_attribute("href")
+                        if not h:
+                            continue
+                        ruta = urllib.parse.urlparse(h).path
+                        if ruta and ruta not in rutas:
+                            rutas.append(ruta)
+                    rutas_seguras = [enmascarar_digitos(r) for r in rutas[:15]]
+                    print(f"      Bloque {i}: {rutas_seguras}", flush=True)
+
+            # 2) Censo de TODOS los links de la página, no solo los que están
+            #    dentro de los bloques. Agrupamos rutas idénticas (ya
+            #    enmascaradas) para ver de un vistazo qué formatos hay.
+            todos = page.query_selector_all("a[href]")
+            print(
+                f"   🔎 Links totales en la página: {len(todos)}"
+                " — rutas más comunes (dígitos enmascarados con #):",
+                flush=True,
+            )
+            conteo_rutas = {}
+            for a in todos:
+                h = a.get_attribute("href")
+                if not h:
+                    continue
+                ruta = urllib.parse.urlparse(h).path
+                if not ruta or ruta == "/":
+                    continue
+                patron = enmascarar_digitos(ruta)
+                conteo_rutas[patron] = conteo_rutas.get(patron, 0) + 1
+            for patron, veces in sorted(
+                conteo_rutas.items(), key=lambda kv: kv[1], reverse=True
+            )[:30]:
+                print(f"      {veces:>3}x {patron}", flush=True)
+
+            # 3) Rutas que huelen a publicación aunque no usen /posts/ ni
+            #    /permalink/ (story_fbid, ?story, /groups/<id>/<algo>, etc.).
+            sospechosas = sorted(
+                patron
+                for patron in conteo_rutas
+                if "/groups/" in patron
+                and patron.rstrip("/").count("/") >= 3
+            )
+            print(
+                "   🔎 Rutas candidatas a publicación dentro del grupo:"
+                f" {sospechosas[:20] if sospechosas else 'ninguna'}",
+                flush=True,
+            )
 
         posts_pendientes = []
         for a in enlaces:
