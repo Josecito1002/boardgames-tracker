@@ -31,10 +31,12 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           FB_COOKIES: ${{ secrets.FB_COOKIES }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASS: ${{ secrets.GMAIL_APP_PASS }}
         run: |
           python main.py
+          
 
       - name: Guardar historial de publicaciones y Excel
         run: |
