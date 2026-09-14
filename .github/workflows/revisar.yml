@@ -21,18 +21,47 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          # Cachea las ruedas de pip entre corridas (clave: requirements.txt).
+          cache: pip
 
-      - name: Instalar dependencias y Playwright
+      - name: Instalar dependencias de Python
+        run: pip install -r requirements.txt
+
+      # La versión instalada de Playwright decide qué build de Chromium hace
+      # falta, así que se usa como clave del caché: al actualizar Playwright
+      # el caché se invalida solo y se baja el navegador correcto.
+      - name: Detectar version de Playwright
+        id: pw
         run: |
-          pip install playwright
-          playwright install chromium --with-deps
-          
+          echo "version=$(playwright --version | tr -d ' ')" >> "$GITHUB_OUTPUT"
+
+      - name: Restaurar navegador de Playwright desde cache
+        id: cache-navegador
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
+
+      # Solo se descarga Chromium (~130 MB) cuando el caché falla. En un acierto
+      # basta con instalar las librerías del sistema, que no se pueden cachear
+      # porque son paquetes apt de la VM.
+      - name: Instalar Chromium
+        if: steps.cache-navegador.outputs.cache-hit != 'true'
+        run: playwright install chromium --with-deps
+
+      - name: Instalar librerias de sistema para Chromium
+        if: steps.cache-navegador.outputs.cache-hit == 'true'
+        run: playwright install-deps chromium
+
+      # 'apt-get update' tarda más que la instalación misma, así que solo se
+      # ejecuta si el índice de paquetes de la imagen resultó estar viejo.
       - name: Instalar Tesseract OCR
         run: |
-          sudo apt-get update
-          sudo apt-get install -y tesseract-ocr tesseract-ocr-spa
-          pip install pytesseract pillow
-          
+          sudo apt-get install -y --no-install-recommends \
+            tesseract-ocr tesseract-ocr-spa \
+          || { sudo apt-get update && sudo apt-get install -y --no-install-recommends \
+            tesseract-ocr tesseract-ocr-spa; }
+
       - name: Ejecutar revision de Marketplace
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
