@@ -1,0 +1,43 @@
+name: Revision Marketplace Juegos de Mesa
+
+on:
+  schedule:
+    # Corre 4 veces al día en hora de Guatemala (8:00 AM, 1:00 PM, 6:00 PM y 10:00 PM)
+    # En UTC equivale a: 14:00, 19:00, 00:00 y 04:00
+    - cron: '0 0,4,14,19 * * *'
+  workflow_dispatch: # Permite ejecutarlo manualmente con un botón cuando quieras
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar codigo del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias y Playwright
+        run: |
+          pip install playwright
+          playwright install chromium --with-deps
+
+      - name: Ejecutar revision de Marketplace
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python main.py
+
+      - name: Guardar historial de publicaciones vistas
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add vistos.json
+          git commit -m "Actualizar historial de publicaciones vistas" || echo "Sin cambios en vistos.json"
+          git push
+          
