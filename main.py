@@ -1,394 +1,365 @@
-import os, json, re, base64, time, csv, urllib.request, urllib.parse
-from datetime import datetime
+from email.mime.image import MIMEImage
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+import json
+import os
+import re
+import smtplib
+import ssl
+import time
+import urllib.request
 from playwright.sync_api import sync_playwright
 
-# Variables de entorno leídas de forma segura desde GitHub Secrets
+# Variables de entorno leídas desde GitHub Secrets
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID") or "5171466462"
-GEMINI_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
 FB_COOKIES = os.environ.get("FB_COOKIES")
 
-# Enlaces prioritarios compartidos (se analizan de primero y completos)
+GMAIL_USER = os.environ.get("GMAIL_USER")
+GMAIL_APP_PASS = os.environ.get("GMAIL_APP_PASS")
+
+# Enlaces prioritarios a revisar primero
 URLS_PRIORITARIAS = [
     "https://www.facebook.com/share/1Ljt24Gr7u/",
-    "https://www.facebook.com/share/1Hp3k4feUm/"
-]
-
-# Lista de deseos (Wishlist personal)
-WISHLIST = [
-    "binding of isaac",
-    "four souls",
-    "slay the spire"
-]
-
-def es_wishlist(nombre):
-    nom = nombre.lower()
-    return any(w in nom for w in WISHLIST)
-
-CSV_FILE = "historial_juegos.csv"
-CAMPOS_CSV = [
-    "Fecha", "Juego", "En Wishlist", "Precio Marketplace (GTQ)", "Precio Texto", "Origen Precio",
-    "Buena Oferta (>= 35% ahorro)", "Precio Amazon (USD)", "Equivalente Amazon (GTQ)",
-    "Ahorro Estimado (%)", "BGG Rating", "BGG Complejidad", "ID Publicacion", "Enlace Marketplace"
+    "https://www.facebook.com/share/1Hp3k4feUm/",
 ]
 
 PALABRAS_MUEBLES = [
-    "comedor", "tocador", "cabecera", "mesa de noche", "mesas de noche", "mesa de centro",
-    "silla", "sillas", "mueble", "muebles", "sala", "ropero", "closet", "cocina"
+    "comedor",
+    "tocador",
+    "cabecera",
+    "mesa de noche",
+    "mesas de noche",
+    "mesa de centro",
+    "silla",
+    "sillas",
+    "mueble",
+    "muebles",
+    "sala",
+    "ropero",
+    "closet",
+    "cocina",
 ]
 
+
 def es_mueble(texto):
-    t = texto.lower()
-    if any(m in t for m in PALABRAS_MUEBLES):
-        if not any(j in t for j in ["catan", "cartas", "tablero", "bgg", "hasbro", "devir", "monopoly", "carcassonne", "clue", "basta", "splendor", "dixit", "risk", "terra mystica"]):
-            return True
-    return False
+  t = texto.lower()
+  if any(m in t for m in PALABRAS_MUEBLES):
+    if not any(
+        j in t
+        for j in [
+            "catan",
+            "cartas",
+            "tablero",
+            "bgg",
+            "hasbro",
+            "devir",
+            "monopoly",
+            "carcassonne",
+            "clue",
+            "basta",
+            "splendor",
+            "dixit",
+            "risk",
+            "terra mystica",
+        ]
+    ):
+      return True
+  return False
 
-def registrar_en_csv(item_data, post_url, iid):
-    archivo_nuevo = not os.path.exists(CSV_FILE)
-    try:
-        with open(CSV_FILE, "a", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=CAMPOS_CSV)
-            if archivo_nuevo:
-                writer.writeheader()
-            
-            p_post = item_data.get("precio_post")
-            p_usd = item_data.get("precio_amazon_usd")
-            equiv_gtq = round(p_usd * 7.80, 2) if (p_usd and p_usd > 0) else None
-            
-            ahorro_num = None
-            ahorro_str = None
-            if p_post and p_post > 0 and equiv_gtq and equiv_gtq > p_post:
-                ahorro_num = round(((equiv_gtq - p_post) / equiv_gtq) * 100)
-                ahorro_str = f"{ahorro_num}%"
-
-            es_buena_oferta = "SÍ" if (ahorro_num is not None and ahorro_num >= 35) else "NO"
-            nombre = item_data.get("juego", "Desconocido")
-
-            writer.writerow({
-                "Fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "Juego": nombre,
-                "En Wishlist": "SÍ" if es_wishlist(nombre) else "NO",
-                "Precio Marketplace (GTQ)": p_post or "",
-                "Precio Texto": item_data.get("precio_estimado_post", ""),
-                "Origen Precio": item_data.get("origen_precio", ""),
-                "Buena Oferta (>= 35% ahorro)": es_buena_oferta,
-                "Precio Amazon (USD)": p_usd or "",
-                "Equivalente Amazon (GTQ)": equiv_gtq or "",
-                "Ahorro Estimado (%)": ahorro_str or "",
-                "BGG Rating": item_data.get("rating_bgg", ""),
-                "BGG Complejidad": item_data.get("peso_bgg", ""),
-                "ID Publicacion": iid,
-                "Enlace Marketplace": post_url
-            })
-    except Exception as e:
-        print(f"Error al escribir en CSV: {e}", flush=True)
 
 def tg_send(texto):
-    try:
-        url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-        payload = json.dumps({"chat_id": CHAT_ID, "text": texto, "parse_mode": "HTML", "disable_web_page_preview": False}).encode("utf-8")
-        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            return json.loads(r.read()).get("result", {}).get("message_id")
-    except Exception as e:
-        print(f"Error tg_send: {e}", flush=True)
-        return None
-
-def tg_edit(msg_id, texto):
-    if not msg_id: return
-    try:
-        url = f"https://api.telegram.org/bot{TG_TOKEN}/editMessageText"
-        payload = json.dumps({"chat_id": CHAT_ID, "message_id": msg_id, "text": texto, "parse_mode": "HTML"}).encode("utf-8")
-        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=10) as r: pass
-    except Exception: pass
-
-def alerta(item_data, url_post, thumb=None):
-    nombre = item_data.get("juego", "Juego de mesa")
-    p_post = item_data.get("precio_post")
-    p_estimado = item_data.get("precio_estimado_post") or ("Ver en publicación" if not p_post else f"Q{p_post:.2f}")
-    origen = item_data.get("origen_precio", "No especificado")
-    p_usd = item_data.get("precio_amazon_usd")
-    rating = item_data.get("rating_bgg")
-    peso = item_data.get("peso_bgg")
-
-    badge_wishlist = "🌟 <b>[¡EN TU WISHLIST!]</b> 🌟\n" if es_wishlist(nombre) else ""
-    badge_oferta = ""
-
-    amazon_str = ""
-    ahorro_str = ""
-    if p_usd and p_usd > 0:
-        equiv_gtq = p_usd * 7.80
-        amazon_str = f"🛒 <b>Precio nuevo en Amazon:</b> ~${p_usd:.2f} USD (~Q{equiv_gtq:.0f} GTQ)\n"
-        if p_post and p_post > 0:
-            if equiv_gtq > p_post:
-                descuento = round(((equiv_gtq - p_post) / equiv_gtq) * 100)
-                ahorro_str = f"🔥 <b>Ahorro frente a Amazon:</b> {descuento}%\n"
-                if descuento >= 35:
-                    badge_oferta = f"🎯 <b>[BUENA OFERTA]</b> ({descuento}% más barato que Amazon)\n"
-            else:
-                ahorro_str = "⚠️ <b>Nota:</b> Más caro que en Amazon nuevo\n"
-
-    rating_str = f"⭐ <b>BGG Rating:</b> {rating}/10\n" if rating else ""
-    peso_str = f"🧠 <b>Complejidad:</b> {peso}/5\n" if peso else ""
-
-    msg = (
-        f"🎲 <b>{nombre.upper()}</b>\n\n"
-        f"{badge_wishlist}"
-        f"{badge_oferta}"
-        f"💰 <b>Precio Marketplace:</b> {p_estimado}\n"
-        f"📍 <b>Origen precio:</b> {origen}\n"
-        f"{ahorro_str}"
-        f"{amazon_str}"
-        f"{rating_str}"
-        f"{peso_str}\n"
-        f"🔗 <a href='{url_post}'>Ver en Facebook Marketplace</a>"
+  """Notificación ligera de estado por Telegram (opcional)."""
+  if not TG_TOKEN or not CHAT_ID:
+    return None
+  try:
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+    payload = json.dumps({
+        "chat_id": CHAT_ID,
+        "text": texto,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=payload, headers={"Content-Type": "application/json"}
     )
+    with urllib.request.urlopen(req, timeout=10) as r:
+      return json.loads(r.read()).get("result", {}).get("message_id")
+  except Exception as e:
+    print(f"Error tg_send: {e}", flush=True)
+    return None
 
-    if thumb:
-        try:
-            url_photo = f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto"
-            payload_photo = json.dumps({"chat_id": CHAT_ID, "photo": thumb, "caption": msg, "parse_mode": "HTML"}).encode("utf-8")
-            req_photo = urllib.request.Request(url_photo, data=payload_photo, headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req_photo, timeout=10) as r:
-                if json.loads(r.read()).get("ok"): return True
-        except Exception: pass
-    return tg_send(msg) is not None
 
-def extraer_ia(texto_completo, img_url=None):
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent"
-    prompt = (
-        "Eres un experto absoluto en juegos de mesa y evaluador de precios en Guatemala.\n"
-        "Analiza esta publicación de Facebook Marketplace (incluye título, precio mostrado, descripción detallada y/o fotos).\n"
-        "REGLA CRÍTICA DE EXHAUSTIVIDAD:\n"
-        "- Si hay una lista en la descripción (ej. 'Juego X - Q50, Juego Y - Q100' o lista alfabética), extrae CADA UNO de los juegos de la lista con su precio exacto sin omitir ninguno.\n"
-        "- Si hay fotos con pilas de cajas o estantes, identifica todos los títulos visibles.\n\n"
-        f"Texto de la publicación:\n\"\"\"{texto_completo}\"\"\"\n\n"
-        "Para cada juego de mesa encontrado, devuelve:\n"
-        "1. 'juego': Nombre oficial del juego.\n"
-        "2. 'precio_post': Precio individual numérico en Quetzales (float). Si no tiene precio individual pon null.\n"
-        "3. 'precio_estimado_post': Texto legible del precio (ej. 'Q75', 'Q150', 'Rango Q15 - Q200').\n"
-        "4. 'origen_precio': 'Lista en descripción', 'Precio directo del anuncio', o 'Estimado por rango'.\n"
-        "5. 'rating_bgg': Calificación BGG aproximada (1 a 10).\n"
-        "6. 'peso_bgg': Complejidad BGG (1 a 5).\n"
-        "7. 'precio_amazon_usd': Precio aproximado nuevo en Amazon USA en DÓLARES (USD float).\n\n"
-        "Devuelve exclusivamente una lista JSON válida con TODOS los juegos encontrados:\n"
-        '[{"juego": "Nombre", "precio_post": 100.0, "precio_estimado_post": "Q100", "origen_precio": "Lista en descripción", "rating_bgg": 7.2, "peso_bgg": 2.1, "precio_amazon_usd": 24.99}]'
+def enviar_publicacion_correo(iid, url_post, texto_post, ruta_img=None):
+  """Envía los detalles de la publicación y la captura a Gmail para su análisis."""
+  if not GMAIL_USER or not GMAIL_APP_PASS:
+    print(
+        "Aviso: GMAIL_USER o GMAIL_APP_PASS no configurados. Omitiendo envío.",
+        flush=True,
     )
-    parts = [{"text": prompt}]
-    
-    if img_url:
-        try:
-            req_img = urllib.request.Request(img_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req_img, timeout=6) as ir:
-                b64_img = base64.b64encode(ir.read()).decode("utf-8")
-                parts.append({"inline_data": {"mime_type": "image/jpeg", "data": b64_img}})
-        except Exception: pass
+    return False
 
-    payload = {"contents": [{"parts": parts}], "generationConfig": {"response_mime_type": "application/json"}}
-    headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY}
-    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
+  try:
+    asunto = f"[Marketplace Scraper] Publicación ID {iid}"
+    msg = MIMEMultipart("related")
+    msg["Subject"] = asunto
+    msg["From"] = f"Marketplace Scraper <{GMAIL_USER}>"
+    msg["To"] = GMAIL_USER
 
-    for intento in range(4):
-        try:
-            with urllib.request.urlopen(req, timeout=25) as resp:
-                raw_txt = json.loads(resp.read().decode())["candidates"][0]["content"]["parts"][0]["text"]
-                return json.loads(raw_txt)
-        except urllib.error.HTTPError as e:
-            if e.code == 429:
-                print(f"⏳ Límite 429. Pausa de 40s para recargar cuota (intento {intento+1}/4)...", flush=True)
-                time.sleep(40)
-            else:
-                print(f"Error IA: {e}", flush=True)
-                return []
-        except Exception as e:
-            print(f"Error IA: {e}", flush=True)
-            return []
-    return []
+    html_content = f"""
+        <html>
+          <body style="font-family: Arial, sans-serif; color: #222;">
+            <h2>🎲 Nueva publicación detectada: ID {iid}</h2>
+            <p><b>Enlace directo:</b> <a href="{url_post}">{url_post}</a></p>
+            <hr>
+            <h3>Texto y descripción de la publicación:</h3>
+            <pre style="background: #f4f4f4; padding: 12px; border-radius: 6px; white-space: pre-wrap; font-size: 14px;">{texto_post}</pre>
+        """
+
+    if ruta_img and os.path.exists(ruta_img):
+      html_content += """
+            <br>
+            <h3>Captura de pantalla:</h3>
+            <p><img src="cid:captura_marketplace" style="max-width: 650px; border: 1px solid #ccc; border-radius: 4px;"></p>
+            """
+
+    html_content += """
+          </body>
+        </html>
+        """
+
+    msg_alt = MIMEMultipart("alternative")
+    msg.attach(msg_alt)
+    msg_alt.attach(MIMEText(html_content, "html", "utf-8"))
+
+    if ruta_img and os.path.exists(ruta_img):
+      with open(ruta_img, "rb") as f:
+        img = MIMEImage(f.read())
+        img.add_header("Content-ID", "<captura_marketplace>")
+        img.add_header(
+            "Content-Disposition",
+            "inline",
+            filename=os.path.basename(ruta_img),
+        )
+        msg.attach(img)
+
+    context = ssl.create_default_context()
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
+      server.login(GMAIL_USER, GMAIL_APP_PASS)
+      server.sendmail(GMAIL_USER, GMAIL_USER, msg.as_string())
+
+    print(f"📧 Correo enviado para ID {iid}.", flush=True)
+    return True
+  except Exception as e:
+    print(f"Error al enviar correo: {e}", flush=True)
+    return False
+
 
 def raspar():
-    vistos = set()
-    juegos_notificados_hoy = set()
-    url_busqueda = "https://www.facebook.com/marketplace/mixco-guatemala/search/?query=juegos%20de%20mesa"
+  vistos = set()
+  if os.path.exists("vistos.json"):
+    try:
+      with open("vistos.json", "r", encoding="utf-8") as f:
+        vistos = set(json.load(f))
+    except Exception:
+      pass
 
-    print("Iniciando revisión con enlaces prioritarios y Wishlist...", flush=True)
-    status_id = tg_send("📡 <b>Iniciando búsqueda en Marketplace...</b>\nProcesando primero publicaciones prioritarias y buscando títulos de Wishlist...")
+  url_busqueda = "https://www.facebook.com/marketplace/mixco-guatemala/search/?query=juegos%20de%20mesa"
+  tg_send(
+      "📡 <b>Iniciando búsqueda en Marketplace...</b>\nExtrayendo publicaciones"
+      " hacia Gmail."
+  )
 
-    with sync_playwright() as p:
-        b = p.chromium.launch(headless=True)
-        ctx = b.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 900}, locale="es-GT",
-            geolocation={"latitude": 14.6333, "longitude": -90.6064}, permissions=["geolocation"]
-        )
-        if FB_COOKIES:
-            try:
-                cks = []
-                for c in json.loads(FB_COOKIES):
-                    ck = {"name": c["name"], "value": c["value"], "domain": c.get("domain", ".facebook.com"), "path": c.get("path", "/")}
-                    ss = str(c.get("sameSite", "")).lower()
-                    if ss == "strict": ck["sameSite"] = "Strict"
-                    elif ss == "lax": ck["sameSite"] = "Lax"
-                    elif ss in ["no_restriction", "none"]: ck["sameSite"] = "None"; ck["secure"] = True
-                    elif c.get("secure"): ck["secure"] = True
-                    cks.append(ck)
-                ctx.add_cookies(cks)
-                print("✅ Cookies inyectadas.", flush=True)
-            except Exception as e: print("Error cookies:", e, flush=True)
+  with sync_playwright() as p:
+    b = p.chromium.launch(headless=True)
+    ctx = b.new_context(
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        ),
+        viewport={"width": 1280, "height": 900},
+        locale="es-GT",
+        geolocation={"latitude": 14.6333, "longitude": -90.6064},
+        permissions=["geolocation"],
+    )
 
-        page = ctx.new_page()
-        items_procesados = 0
+    if FB_COOKIES:
+      try:
+        cks = []
+        for c in json.loads(FB_COOKIES):
+          ck = {
+              "name": c["name"],
+              "value": c["value"],
+              "domain": c.get("domain", ".facebook.com"),
+              "path": c.get("path", "/"),
+          }
+          ss = str(c.get("sameSite", "")).lower()
+          if ss == "strict":
+            ck["sameSite"] = "Strict"
+          elif ss == "lax":
+            ck["sameSite"] = "Lax"
+          elif ss in ["no_restriction", "none"]:
+            ck["sameSite"] = "None"
+            ck["secure"] = True
+          elif c.get("secure"):
+            ck["secure"] = True
+          cks.append(ck)
+        ctx.add_cookies(cks)
+        print("✅ Cookies inyectadas.", flush=True)
+      except Exception as e:
+        print("Error cookies:", e, flush=True)
 
-        # ==========================================
-        # 1. ANALIZAR PRIMERO LOS ENLACES PRIORITARIOS
-        # ==========================================
-        for idx, url_prio in enumerate(URLS_PRIORITARIAS, 1):
-            print(f"\n[PRIORITARIO {idx}/{len(URLS_PRIORITARIAS)}] Abriendo: {url_prio}", flush=True)
-            tg_edit(status_id, f"⭐ <b>Analizando publicación prioritaria {idx}/{len(URLS_PRIORITARIAS)}...</b>\nLeyendo lista completa de juegos...")
-            try:
-                page.goto(url_prio, timeout=35000, wait_until="domcontentloaded")
-                page.wait_for_timeout(3000)
+    page = ctx.new_page()
+    items_enviados = 0
 
-                real_url = page.url
-                m = re.search(r"/item/(\d+)", real_url)
-                iid = m.group(1) if m else f"prio_{idx}"
+    # 1. PUBLICACIONES PRIORITARIAS
+    for idx, url_prio in enumerate(URLS_PRIORITARIAS, 1):
+      print(
+          f"\n[PRIORITARIO {idx}/{len(URLS_PRIORITARIAS)}] Abriendo:"
+          f" {url_prio}",
+          flush=True,
+      )
+      try:
+        page.goto(url_prio, timeout=35000, wait_until="domcontentloaded")
+        page.wait_for_timeout(3000)
 
-                try:
-                    ver_mas = page.query_selector('div[role="main"] div[role="button"]:has-text("Ver más")')
-                    if ver_mas: ver_mas.click(); page.wait_for_timeout(500)
-                except Exception: pass
+        real_url = page.url
+        m = re.search(r"/item/(\d+)", real_url)
+        iid = m.group(1) if m else f"prio_{idx}"
 
-                main_el = page.query_selector('div[role="main"]')
-                texto_completo = main_el.inner_text() if main_el else page.inner_text("body")
-
-                img_elem = page.query_selector('div[role="main"] img')
-                img_url = img_elem.get_attribute("src") if img_elem else None
-
-                # Si la descripción ya trae una lista larga en texto, pasamos solo texto para no saturar cuota
-                foto_para_ia = None if len(texto_completo) > 200 else img_url
-
-                print(f"Consultando IA para publicación prioritaria ID {iid}...", flush=True)
-                items_ia = extraer_ia(texto_completo[:3000], img_url=foto_para_ia)
-
-                if items_ia:
-                    vistos.add(iid)
-
-                for item in items_ia:
-                    nom = item.get("juego", "").strip()
-                    p = item.get("precio_post")
-
-                    registrar_en_csv(item, real_url, iid)
-
-                    clave = re.sub(r'[^a-z0-9]', '', nom.lower())
-                    if not clave or clave in juegos_notificados_hoy:
-                        continue
-
-                    if es_wishlist(nom) or (p and p >= 15.0) or (not p and nom):
-                        juegos_notificados_hoy.add(clave)
-                        print(f"🚨 Alerta enviada: {nom}", flush=True)
-                        alerta(item, real_url, img_url)
-                        items_procesados += 1
-
-                time.sleep(16)
-            except Exception as e_prio:
-                print(f"Error en enlace prioritario {url_prio}: {e_prio}", flush=True)
-
-        # ==========================================
-        # 2. CONTINUAR CON EL BARRIDO DE MARKETPLACE
-        # ==========================================
         try:
-            print("\nCargando Marketplace Mixco para otras publicaciones...", flush=True)
-            page.goto(url_busqueda, timeout=45000, wait_until="domcontentloaded")
-            page.wait_for_timeout(3000)
+          ver_mas = page.query_selector(
+              'div[role="main"] div[role="button"]:has-text("Ver más")'
+          )
+          if ver_mas:
+            ver_mas.click()
+            page.wait_for_timeout(500)
+        except Exception:
+          pass
 
-            try:
-                page.keyboard.press("Escape")
-                for s in ['[aria-label="Cerrar"]', '[aria-label="Close"]', 'div[role="button"]:has-text("Ahora no")']:
-                    btn = page.query_selector(s)
-                    if btn: btn.click(); page.wait_for_timeout(500)
-            except Exception: pass
+        main_el = page.query_selector('div[role="main"]')
+        texto_completo = (
+            main_el.inner_text() if main_el else page.inner_text("body")
+        )
 
-            for _ in range(5):
-                page.evaluate("window.scrollBy(0, 1500)")
-                page.wait_for_timeout(1800)
+        ruta_captura = f"captura_{iid}.png"
+        page.screenshot(path=ruta_captura)
 
-            enlaces = page.query_selector_all('a[href*="/marketplace/item/"], a[href*="/item/"]')
-            iids_pendientes = []
-            for a in enlaces:
-                href = a.get_attribute("href") or ""
-                txt = a.inner_text().strip()
-                m = re.search(r"/item/(\d+)", href)
-                if m:
-                    iid = m.group(1)
-                    if iid not in vistos and iid not in iids_pendientes:
-                        if es_mueble(txt): continue
-                        iids_pendientes.append(iid)
+        if enviar_publicacion_correo(
+            iid, real_url, texto_completo, ruta_captura
+        ):
+          vistos.add(iid)
+          items_enviados += 1
 
-            total_a_revisar = len(iids_pendientes)
-            print(f"Publicaciones adicionales encontradas: {total_a_revisar}...", flush=True)
-            tg_edit(status_id, f"🔍 <b>Analizando {total_a_revisar} publicaciones adicionales en Mixco...</b>")
+        if os.path.exists(ruta_captura):
+          os.remove(ruta_captura)
+        time.sleep(5)
+      except Exception as e_prio:
+        print(
+            f"Error en publicación prioritaria {url_prio}: {e_prio}", flush=True
+        )
 
-            for idx, iid in enumerate(iids_pendientes, 1):
-                post_url = f"https://www.facebook.com/marketplace/item/{iid}/"
-                print(f"[{idx}/{total_a_revisar}] Abriendo ID {iid}...", flush=True)
-                tg_edit(status_id, f"⏳ <b>Progreso adicional: {idx}/{total_a_revisar}</b>...")
+    # 2. BARRIDO GENERAL EN MARKETPLACE
+    try:
+      print("\nCargando Marketplace...", flush=True)
+      page.goto(url_busqueda, timeout=45000, wait_until="domcontentloaded")
+      page.wait_for_timeout(3000)
 
-                try:
-                    page.goto(post_url, timeout=20000, wait_until="domcontentloaded")
-                    page.wait_for_timeout(2000)
+      try:
+        page.keyboard.press("Escape")
+        for s in [
+            '[aria-label="Cerrar"]',
+            '[aria-label="Close"]',
+            'div[role="button"]:has-text("Ahora no")',
+        ]:
+          btn = page.query_selector(s)
+          if btn:
+            btn.click()
+            page.wait_for_timeout(400)
+      except Exception:
+        pass
 
-                    try:
-                        ver_mas = page.query_selector('div[role="main"] div[role="button"]:has-text("Ver más")')
-                        if ver_mas: ver_mas.click(); page.wait_for_timeout(400)
-                    except Exception: pass
+      for _ in range(5):
+        page.evaluate("window.scrollBy(0, 1500)")
+        page.wait_for_timeout(1800)
 
-                    main_el = page.query_selector('div[role="main"]')
-                    texto_completo = main_el.inner_text() if main_el else page.inner_text("body")
-                    
-                    if es_mueble(texto_completo):
-                        vistos.add(iid)
-                        continue
+      enlaces = page.query_selector_all(
+          'a[href*="/marketplace/item/"], a[href*="/item/"]'
+      )
+      iids_pendientes = []
+      for a in enlaces:
+        href = a.get_attribute("href") or ""
+        txt = a.inner_text().strip()
+        m = re.search(r"/item/(\d+)", href)
+        if m:
+          iid = m.group(1)
+          if (
+              iid not in vistos
+              and iid not in iids_pendientes
+              and not es_mueble(txt)
+          ):
+            iids_pendientes.append(iid)
 
-                    img_elem = page.query_selector('div[role="main"] img')
-                    img_url = img_elem.get_attribute("src") if img_elem else None
+      total_a_revisar = min(len(iids_pendientes), 15)
+      print(f"Publicaciones a procesar: {total_a_revisar}...", flush=True)
 
-                    foto_para_ia = None if len(texto_completo) > 200 else img_url
-                    items_ia = extraer_ia(texto_completo[:2000], img_url=foto_para_ia)
+      for idx, iid in enumerate(iids_pendientes[:total_a_revisar], 1):
+        post_url = f"https://www.facebook.com/marketplace/item/{iid}/"
+        print(f"[{idx}/{total_a_revisar}] Abriendo ID {iid}...", flush=True)
 
-                    if items_ia:
-                        vistos.add(iid)
+        try:
+          page.goto(post_url, timeout=20000, wait_until="domcontentloaded")
+          page.wait_for_timeout(2000)
 
-                    for item in items_ia:
-                        nom = item.get("juego", "").strip()
-                        p = item.get("precio_post")
+          try:
+            ver_mas = page.query_selector(
+                'div[role="main"] div[role="button"]:has-text("Ver más")'
+            )
+            if ver_mas:
+              ver_mas.click()
+              page.wait_for_timeout(400)
+          except Exception:
+            pass
 
-                        registrar_en_csv(item, post_url, iid)
+          main_el = page.query_selector('div[role="main"]')
+          texto_completo = (
+              main_el.inner_text() if main_el else page.inner_text("body")
+          )
 
-                        clave = re.sub(r'[^a-z0-9]', '', nom.lower())
-                        if not clave or clave in juegos_notificados_hoy:
-                            continue
+          if es_mueble(texto_completo):
+            vistos.add(iid)
+            continue
 
-                        if es_wishlist(nom) or (p and p >= 15.0) or (not p and nom):
-                            juegos_notificados_hoy.add(clave)
-                            print(f"🚨 Alerta: {nom}", flush=True)
-                            alerta(item, post_url, img_url)
-                            items_procesados += 1
+          ruta_captura = f"captura_{iid}.png"
+          page.screenshot(path=ruta_captura)
 
-                except Exception as ep:
-                    print(f"Error al procesar ID {iid}: {ep}", flush=True)
+          if enviar_publicacion_correo(
+              iid, post_url, texto_completo, ruta_captura
+          ):
+            vistos.add(iid)
+            items_enviados += 1
 
-                time.sleep(16)
+          if os.path.exists(ruta_captura):
+            os.remove(ruta_captura)
+        except Exception as ep:
+          print(f"Error procesando ID {iid}: {ep}", flush=True)
 
-            tg_edit(status_id, f"✅ <b>Barrido completado.</b>\nSe revisaron las publicaciones prioritarias y {total_a_revisar} anuncios de Mixco.\nTotal alertas: {items_procesados}.")
-            print(f"Finalizado con éxito. Total alertas: {items_procesados}", flush=True)
-        except Exception as e:
-            print(f"Error general: {e}", flush=True)
-            tg_edit(status_id, f"❌ <b>Error:</b> {e}")
-        finally: b.close()
+        time.sleep(5)
 
-    with open("vistos.json", "w") as f: json.dump(list(vistos), f, indent=2)
+      tg_send(
+          f"✅ <b>Barrido completado.</b>\nSe enviaron {items_enviados}"
+          " publicaciones a Gmail para registro en Google Sheets."
+      )
+    except Exception as e:
+      print(f"Error general: {e}", flush=True)
+      tg_send(f"❌ <b>Error:</b> {e}")
+    finally:
+      b.close()
+
+  with open("vistos.json", "w", encoding="utf-8") as f:
+    json.dump(list(vistos), f, indent=2)
+
 
 if __name__ == "__main__":
-    raspar()
-    
+  raspar()
+      
