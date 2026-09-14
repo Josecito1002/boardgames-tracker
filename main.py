@@ -3,11 +3,12 @@ from playwright.sync_api import sync_playwright
 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN") or "8578108762:AAHw2jIcKs8L8X44DxIQ7tjZTgscN2rjYKI"
 CHAT_ID = os.environ.get("CHAT_ID") or "5171466462"
-GEMINI_KEY = base64.b64decode("QVEuQWI4Uk42SmtXaTBiSnpjWUZuNkIyV1p5SWlsdXdyYnJ1bjdOZmpaQVQtdGN1cnhkYkE=").decode().strip()
+GEMINI_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
 FB_COOKIES = os.environ.get("FB_COOKIES")
 
 def alerta(titulo, precio, rating, rank, peso, url_post, thumb=None):
-    msg = f"🎲 <b>¡JUEGO DETECTADO!</b>\n\n📦 <b>Juego:</b> {titulo}\n💰 <b>Precio:</b> Q{precio:.2f}\n⭐ <b>BGG:</b> {rating or 'N/A'}/10 (#{rank or 'N/A'})\n🧠 <b>Peso:</b> {peso or 'N/A'}/5\n\n🔗 <a href='{url_post}'>Ver en Facebook</a>"
+    precio_str = f"Q{precio:.2f}" if precio and precio > 0 else "Ver en publicación"
+    msg = f"🎲 <b>¡JUEGO DETECTADO!</b>\n\n📦 <b>Juego:</b> {titulo}\n💰 <b>Precio:</b> {precio_str}\n⭐ <b>BGG:</b> {rating or 'N/A'}/10 (#{rank or 'N/A'})\n🧠 <b>Peso:</b> {peso or 'N/A'}/5\n\n🔗 <a href='{url_post}'>Ver en Facebook</a>"
     def _post(ep, data):
         r = urllib.request.Request(ep, data=json.dumps(data).encode(), headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(r, timeout=10) as resp: return json.loads(resp.read())
@@ -50,11 +51,27 @@ def info_bgg(nombre):
     except Exception as e:
         print(f"Error BGG ({nombre}): {e}"); return None
 
-def extraer_ia(texto):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={GEMINI_KEY}"
-    prompt = f"Analiza este anuncio de Facebook Marketplace en Guatemala y extrae los juegos de mesa y precios en Quetzales [{{'juego': 'nombre', 'precio': 150.0}}]. Si el texto dice Gratis o Q1 y no hay precio claro pon precio null. Texto: {texto}"
-    payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"response_mime_type": "application/json"}}
-    req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+# Extractor multimodal: analiza el texto y la foto de las cajas
+def extraer_ia(texto, img_url=None):
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent"
+    prompt = (
+        "Analiza este anuncio de Facebook Marketplace en Guatemala. "
+        "Si hay imagen, identifica los juegos de mesa visibles en las cajas o portadas. "
+        "Extrae cada juego de mesa y su precio en Quetzales. Si no hay precio claro o dice Q1/Gratis pon null. "
+        f"Devuelve exclusivamente un JSON: [{{\"juego\": \"nombre\", \"precio\": 150.0}}].\\nTexto: {texto}"
+    )
+    parts = [{"text": prompt}]
+    if img_url:
+        try:
+            req_img = urllib.request.Request(img_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req_img, timeout=6) as ir:
+                b64_img = base64.b64encode(ir.read()).decode("utf-8")
+                parts.append({"inline_data": {"mime_type": "image/jpeg", "data": b64_img}})
+        except Exception: pass
+
+    payload = {"contents": [{"parts": parts}], "generationConfig": {"response_mime_type": "application/json"}}
+    headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY}
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(json.loads(resp.read().decode())["candidates"][0]["content"]["parts"][0]["text"])
@@ -121,9 +138,13 @@ def raspar():
 
                 if iid in vistos: continue
                 post_url = f"https://www.facebook.com/marketplace/item/{iid}/"
-                print(f"\nID {iid}: {txt[:80]}...")
+                
+                # Extraer la imagen de la caja si existe
+                img_elem = a.query_selector("img")
+                img_url = img_elem.get_attribute("src") if img_elem else None
 
-                items_ia = extraer_ia(txt)
+                print(f"\nID {iid}: {txt[:80]}...")
+                items_ia = extraer_ia(txt, img_url=img_url)
                 if items_ia:
                     vistos.add(iid)
                     items_procesados += 1
@@ -135,6 +156,12 @@ def raspar():
                         if bgg:
                             print(f"🚨 Alerta enviada: {bgg['nombre']} a Q{p}")
                             alerta(bgg["nombre"], p, bgg["rating"], bgg["rank"], bgg["weight"], post_url, bgg["thumb"])
+                    elif not p:
+                        # Si no hay precio en texto (ej. Q1 o Gratis), pero la IA reconoció un juego relevante en la foto
+                        bgg = info_bgg(item.get("juego"))
+                        if bgg and (bgg.get("rating") or 0) >= 6.8:
+                            print(f"🚨 Alerta por juego en foto: {bgg['nombre']}")
+                            alerta(f"{bgg['nombre']} (Ver precio en foto/anuncio)", 0.0, bgg["rating"], bgg["rank"], bgg["weight"], post_url, bgg["thumb"])
 
             print(f"\nTotal items procesados con IA: {items_procesados}")
         except Exception as e: print("Error durante scraping:", e)
@@ -145,4 +172,4 @@ def raspar():
 
 if __name__ == "__main__":
     raspar()
-    
+        
