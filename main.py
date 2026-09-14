@@ -3,7 +3,7 @@ from playwright.sync_api import sync_playwright
 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN") or "8578108762:AAHw2jIcKs8L8X44DxIQ7tjZTgscN2rjYKI"
 CHAT_ID = os.environ.get("CHAT_ID") or "5171466462"
-GEMINI_KEY = os.environ.get("GEMINI_API_KEY") or base64.b64decode("QVEuQWI4Uk42SmtXaTBiSnpjWUZuNkIyV1p5SWlsdXdyYnJ1bjdOZmpaQVQtdGN1cnhkYkE=").decode()
+GEMINI_KEY = base64.b64decode("QVEuQWI4Uk42SmtXaTBiSnpjWUZuNkIyV1p5SWlsdXdyYnJ1bjdOZmpaQVQtdGN1cnhkYkE=").decode().strip()
 FB_COOKIES = os.environ.get("FB_COOKIES")
 
 def alerta(titulo, precio, rating, rank, peso, url_post, thumb=None):
@@ -52,17 +52,20 @@ def info_bgg(nombre):
 
 def extraer_ia(texto):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={GEMINI_KEY}"
-    prompt = f"Analiza este anuncio de Facebook Marketplace en Guatemala y extrae los juegos de mesa y precios en Quetzales [{{'juego': 'nombre', 'precio': 150.0}}]. Si el precio esta en USD o no es juego de mesa o no hay precio pon null. Texto: {texto}"
+    prompt = f"Analiza este anuncio de Facebook Marketplace en Guatemala y extrae los juegos de mesa y precios en Quetzales [{{'juego': 'nombre', 'precio': 150.0}}]. Si el texto dice Gratis o Q1 y no hay precio claro pon precio null. Texto: {texto}"
     payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"response_mime_type": "application/json"}}
     req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(json.loads(resp.read().decode())["candidates"][0]["content"]["parts"][0]["text"])
+    except urllib.error.HTTPError as e:
+        print(f"Error IA: {e} - {e.read().decode('utf-8', errors='ignore')}")
+        return []
     except Exception as e:
         print(f"Error IA: {e}"); return []
 
 def raspar():
-    vistos = set(json.load(open("vistos.json"))) if os.path.exists("vistos.json") else set()
+    vistos = set()
     url = "https://www.facebook.com/marketplace/guatemalacity/search/?query=juegos%20de%20mesa"
     with sync_playwright() as p:
         b = p.chromium.launch(headless=True)
@@ -103,12 +106,8 @@ def raspar():
                 page.evaluate("window.scrollBy(0, 1000)")
                 page.wait_for_timeout(2000)
 
-            # Enviar foto a Telegram con la ubicación confirmada
-            page.screenshot(path="debug_pantalla.png")
-            os.system(f'curl -s -F chat_id="{CHAT_ID}" -F photo=@debug_pantalla.png -F caption="Ubicacion actual: {page.url}" https://api.telegram.org/bot{TG_TOKEN}/sendPhoto')
-
             enlaces = page.query_selector_all('a[href*="/marketplace/item/"], a[href*="/item/"]')
-            print(f"Total publicaciones encontradas: {len(enlaces)}")
+            print(f"Total publicaciones encontradas en Guatemala: {len(enlaces)}")
 
             items_procesados = 0
             for a in enlaces:
@@ -121,12 +120,15 @@ def raspar():
                 if not iid: continue
 
                 if iid in vistos: continue
-                vistos.add(iid)
                 post_url = f"https://www.facebook.com/marketplace/item/{iid}/"
                 print(f"\nID {iid}: {txt[:80]}...")
-                items_procesados += 1
 
-                for item in extraer_ia(txt):
+                items_ia = extraer_ia(txt)
+                if items_ia:
+                    vistos.add(iid)
+                    items_procesados += 1
+
+                for item in items_ia:
                     p = item.get("precio")
                     if p and 15.0 <= p <= 250.0:
                         bgg = info_bgg(item.get("juego"))
@@ -134,7 +136,7 @@ def raspar():
                             print(f"🚨 Alerta enviada: {bgg['nombre']} a Q{p}")
                             alerta(bgg["nombre"], p, bgg["rating"], bgg["rank"], bgg["weight"], post_url, bgg["thumb"])
 
-            print(f"\nTotal items nuevos procesados: {items_procesados}")
+            print(f"\nTotal items procesados con IA: {items_procesados}")
         except Exception as e: print("Error durante scraping:", e)
         finally: b.close()
 
