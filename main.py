@@ -387,6 +387,65 @@ def descargar_fotos_reales(page, iid):
     return rutas
 
 
+def extraer_publicaciones_del_html(html, slug_grupo):
+    """Saca IDs de publicaciones del HTML crudo del grupo.
+
+    Facebook ya casi no entrega <a href="/groups/x/posts/123"> en el feed:
+    los enlaces se arman con JavaScript al hacer clic, así que buscarlos con
+    query_selector_all devuelve 0 aunque el feed sí haya cargado. Los IDs,
+    en cambio, sí viajan en el payload JSON incrustado en la página, y de ahí
+    se puede reconstruir el permalink canónico.
+
+    Se quitan las barras invertidas primero porque dentro del JSON incrustado
+    las comillas y las barras vienen escapadas (\"post_id\":\"123\",
+    \/groups\/...).
+    """
+    plano = html.replace("\\", "")
+    ids = []
+
+    patrones = [
+        r"/groups/[^/\"?\s]+/posts/(\d{8,})",
+        r"/groups/[^/\"?\s]+/permalink/(\d{8,})",
+        r"/groups/[^/\"?\s]+/multi_permalinks/(\d{8,})",
+        r'"post_id":"(\d{8,})"',
+        r'"top_level_post_id":"(\d{8,})"',
+        r"story_fbid[=:\"]+(\d{8,})",
+    ]
+    for patron in patrones:
+        for pid in re.findall(patron, plano):
+            if pid not in ids:
+                ids.append(pid)
+
+    return [
+        (pid, f"https://www.facebook.com/groups/{slug_grupo}/posts/{pid}/")
+        for pid in ids
+    ]
+
+
+def esperar_feed_del_grupo(page, intentos=10):
+    """Espera a que el feed del grupo deje de crecer antes de leerlo.
+
+    Sin esto se lee la página cuando todavía está el esqueleto de carga (los
+    'Facebook Facebook Facebook...' que salen en el log son el alt de las
+    imágenes placeholder), y se detectan solo los 2 bloques del carrusel de
+    'Destacados'.
+    """
+    try:
+        page.wait_for_selector('div[role="feed"]', timeout=15000)
+    except Exception:
+        pass
+
+    previos = -1
+    for _ in range(intentos):
+        actuales = len(page.query_selector_all('div[role="article"]'))
+        if actuales >= 6 and actuales == previos:
+            break
+        previos = actuales
+        page.evaluate("window.scrollBy(0, 1400)")
+        page.wait_for_timeout(2000)
+    return len(page.query_selector_all('div[role="article"]'))
+
+
 def resolver_url_grupo(page, url_grupo):
     """Normaliza la URL de un grupo/pestaña de grupo de Facebook a
     www.facebook.com, preservando cualquier sub-ruta (ej. /buy_sell_discussion/)
@@ -472,13 +531,7 @@ def raspar_grupo(page, url_grupo, vistos, max_posts=5):
         print(f"   Título de la página cargada: {titulo_pagina!r}", flush=True)
         print(f"   Primeros 500 caracteres visibles: {texto_pagina!r}", flush=True)
 
-        for intento_scroll in range(8):
-            page.evaluate("window.scrollBy(0, 1400)")
-            page.wait_for_timeout(2000)
-            n_articulos_parcial = len(page.query_selector_all('div[role="article"]'))
-            if n_articulos_parcial >= 6:
-                break
-
+        esperar_feed_del_grupo(page)
         articulos = page.query_selector_all('div[role="article"]')
         print(
             f"   Bloques de publicación (div role=article) detectados:"
@@ -567,20 +620,36 @@ def raspar_grupo(page, url_grupo, vistos, max_posts=5):
                 flush=True,
             )
 
-        posts_pendientes = []
+        # Candidatos: primero los <a href> clásicos, y si el feed no trae
+        # ninguno (lo normal hoy: Facebook arma los links con JavaScript al
+        # hacer clic), los IDs incrustados en el payload JSON de la página.
+        candidatos = []
         for a in enlaces:
             href = a.get_attribute("href") or ""
             m = re.search(r"/(?:posts|permalink|multi_permalinks)/(\d+)", href)
             if m:
-                pid = m.group(1)
-                iid = f"GRUPO_{pid}"
-                clean_url = href.split("?")[0]
-                if (
-                    iid not in vistos
-                    and pid not in [p[0] for p in posts_pendientes]
-                    and pid != "0"
-                ):
-                    posts_pendientes.append((pid, clean_url))
+                candidatos.append((m.group(1), href.split("?")[0]))
+
+        slug_grupo = re.search(r"/groups/([^/?]+)", url_resuelta)
+        slug_grupo = slug_grupo.group(1) if slug_grupo else None
+        if not candidatos and slug_grupo:
+            desde_html = extraer_publicaciones_del_html(page.content(), slug_grupo)
+            print(
+                f"   🔎 IDs de publicación encontrados en el HTML de la"
+                f" página: {len(desde_html)}",
+                flush=True,
+            )
+            candidatos = desde_html
+
+        posts_pendientes = []
+        for pid, url_post in candidatos:
+            iid = f"GRUPO_{pid}"
+            if (
+                iid not in vistos
+                and pid not in [p[0] for p in posts_pendientes]
+                and pid != "0"
+            ):
+                posts_pendientes.append((pid, url_post))
 
         total = min(len(posts_pendientes), max_posts)
         print(f"   Publicaciones detectadas en el grupo: {total}", flush=True)
