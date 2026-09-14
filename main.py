@@ -436,9 +436,12 @@ def raspar_grupo(page, url_grupo, vistos, max_posts=5):
         print(f"   Título de la página cargada: {titulo_pagina!r}", flush=True)
         print(f"   Primeros 500 caracteres visibles: {texto_pagina!r}", flush=True)
 
-        for _ in range(4):
-            page.evaluate("window.scrollBy(0, 1200)")
-            page.wait_for_timeout(1500)
+        for intento_scroll in range(8):
+            page.evaluate("window.scrollBy(0, 1400)")
+            page.wait_for_timeout(2000)
+            n_articulos_parcial = len(page.query_selector_all('div[role="article"]'))
+            if n_articulos_parcial >= 6:
+                break
 
         articulos = page.query_selector_all('div[role="article"]')
         print(
@@ -452,6 +455,19 @@ def raspar_grupo(page, url_grupo, vistos, max_posts=5):
             ' a[href*="/multi_permalinks/"]'
         )
         print(f"   Links con /posts|permalink| detectados: {len(enlaces)}", flush=True)
+
+        # Diagnóstico: si no encontramos links con el patrón esperado, mostrar
+        # los hrefs reales que sí existen dentro de los primeros bloques para
+        # descubrir el formato actual que usa Facebook.
+        if len(enlaces) == 0 and articulos:
+            print("   🔎 Volcando hrefs reales de los primeros bloques para diagnóstico:", flush=True)
+            for i, art in enumerate(articulos[:3], 1):
+                hrefs = [
+                    a.get_attribute("href")
+                    for a in art.query_selector_all("a[href]")
+                ]
+                hrefs = [h for h in hrefs if h][:15]
+                print(f"      Bloque {i}: {hrefs}", flush=True)
 
         posts_pendientes = []
         for a in enlaces:
