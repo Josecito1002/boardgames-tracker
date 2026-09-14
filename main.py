@@ -17,6 +17,14 @@ def alerta(titulo, precio, rating, rank, peso, url_post, thumb=None):
         except Exception: pass
     return _post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", {"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML", "disable_web_page_preview": False}).get("ok", False)
 
+def enviar_captura_telegram(ruta_img, caption=""):
+    try:
+        cmd = f'curl -s -F chat_id="{CHAT_ID}" -F photo=@{ruta_img} -F caption="{caption}" https://api.telegram.org/bot{TG_TOKEN}/sendPhoto'
+        os.system(cmd)
+        print("📸 Captura de pantalla enviada a tu Telegram.")
+    except Exception as e:
+        print(f"Error al enviar captura: {e}")
+
 def info_bgg(nombre):
     try:
         url1 = f"https://boardgamegeek.com/xmlapi2/search?{urllib.parse.urlencode({'query': nombre, 'type': 'boardgame'})}"
@@ -88,22 +96,13 @@ def raspar():
 
         page = ctx.new_page()
         try:
-            print("Navegando al buscador oficial de Marketplace...")
+            print("Navegando a Marketplace...")
             page.goto(url, timeout=45000)
+            page.wait_for_timeout(6000)
 
-            # Esperar activamente a que aparezcan las publicaciones en el DOM
-            try:
-                page.wait_for_selector('a[href*="/marketplace/item/"], a[href*="/item/"]', timeout=15000)
-                print("✅ ¡Publicaciones detectadas en el DOM!")
-            except Exception:
-                print("Aviso: Espera agotada, cargando mediante scroll...")
-
-            try:
-                page.keyboard.press("Escape")
-                for s in ['[aria-label="Cerrar"]', '[aria-label="Close"]', 'div[role="button"]:has-text("Ahora no")']:
-                    btn = page.query_selector(s)
-                    if btn: btn.click(); page.wait_for_timeout(1000)
-            except Exception: pass
+            # Tomar captura de pantalla y enviarla a tu Telegram
+            page.screenshot(path="debug_pantalla.png")
+            enviar_captura_telegram("debug_pantalla.png", f"Vista de Facebook: {page.url}")
 
             for _ in range(3):
                 page.evaluate("window.scrollBy(0, 1000)")
@@ -145,4 +144,4 @@ def raspar():
 
 if __name__ == "__main__":
     raspar()
-    
+        
