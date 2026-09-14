@@ -92,17 +92,32 @@ WISHLIST = [
 ]
 
 
-def enmascarar_digitos(valor):
-    """Sustituye cada dígito por '#' antes de imprimir algo en el log.
+def sanear_para_log(valor):
+    """Prepara un texto para imprimirlo sin que GitHub Actions lo tape.
 
-    GitHub Actions enmascara cualquier texto que coincida con un secret
-    (CHAT_ID, por ejemplo) y lo reemplaza por '***'. El ID numérico de la
-    cuenta de Facebook aparece en casi todos los hrefs del grupo, así que
-    cualquier ruta impresa tal cual puede terminar tapada. Para el
-    diagnóstico solo necesitamos el PATRÓN de la ruta, no los números, así
-    que los reemplazamos y así ningún ID puede coincidir con un secret.
+    GitHub reemplaza por '***' cualquier fragmento del log que coincida con
+    un secret, y en el caso de un secret MULTILÍNEA lo hace línea por línea.
+    Si FB_COOKIES está guardado como JSON "bonito", sus líneas sueltas '['
+    y ']' convierten cada corchete del log en '***' — por eso en las
+    corridas anteriores se veía '##***endgroup***' en lugar de
+    '##[endgroup]' y '(div***role=article***)' en lugar de
+    '(div[role=article])'. Además, el ID numérico de la cuenta aparece en
+    casi todos los hrefs y puede coincidir con CHAT_ID.
+
+    Para el diagnóstico solo necesitamos el PATRÓN de la ruta, así que:
+      - cada dígito se sustituye por '#'
+      - los corchetes se sustituyen por paréntesis angulares
+    Así ningún fragmento impreso puede coincidir con un secret.
     """
-    return re.sub(r"\d", "#", str(valor))
+    texto = re.sub(r"\d", "#", str(valor))
+    return texto.replace("[", "⟨").replace("]", "⟩")
+
+
+def lista_para_log(items):
+    """Imprime una lista sin usar la repr de Python (que lleva corchetes)."""
+    if not items:
+        return "(vacío)"
+    return " | ".join(sanear_para_log(i) for i in items)
 
 def evaluar_alerta_telegram(texto):
     """Decide si vale la pena notificar por Telegram.
@@ -466,7 +481,7 @@ def raspar_grupo(page, url_grupo, vistos, max_posts=5):
 
         articulos = page.query_selector_all('div[role="article"]')
         print(
-            f"   Bloques de publicación (div[role=article]) detectados:"
+            f"   Bloques de publicación (div role=article) detectados:"
             f" {len(articulos)}",
             flush=True,
         )
@@ -479,13 +494,18 @@ def raspar_grupo(page, url_grupo, vistos, max_posts=5):
 
         # Diagnóstico: si no encontramos links con el patrón esperado,
         # mostrar qué rutas SÍ existen para descubrir el formato actual.
-        # Todo se imprime con los dígitos sustituidos por '#'
-        # (enmascarar_digitos) porque el ID numérico de la cuenta aparece en
-        # muchos hrefs y coincide con un secret, así que GitHub lo taparía
-        # con "***" y perderíamos el patrón, que es lo único que necesitamos.
+        # Todo pasa por sanear_para_log() para que GitHub no lo tape con
+        # "***": dígitos a '#' (pueden coincidir con CHAT_ID) y corchetes a
+        # '⟨⟩' (un secret multilínea como FB_COOKIES en JSON "bonito" hace
+        # que GitHub enmascare cada '[' y ']' sueltos del log).
         if len(enlaces) == 0:
+            print(
+                "   🔎 Diagnóstico v# activo"
+                " (dígitos a #, corchetes a ⟨⟩ para evitar el enmascarado)",
+                flush=True,
+            )
             # 1) Rutas dentro de los bloques detectados. Ojo: los primeros
-            #    div[role=article] suelen ser el carrusel de "Destacados" y no
+            #    bloques suelen ser el carrusel de "Destacados" y no
             #    publicaciones reales, por eso más abajo revisamos también
             #    TODOS los links de la página.
             if articulos:
@@ -503,8 +523,11 @@ def raspar_grupo(page, url_grupo, vistos, max_posts=5):
                         ruta = urllib.parse.urlparse(h).path
                         if ruta and ruta not in rutas:
                             rutas.append(ruta)
-                    rutas_seguras = [enmascarar_digitos(r) for r in rutas[:15]]
-                    print(f"      Bloque {i}: {rutas_seguras}", flush=True)
+                    print(
+                        f"      Bloque {i}"
+                        f" ({len(rutas)} rutas): {lista_para_log(rutas[:15])}",
+                        flush=True,
+                    )
 
             # 2) Censo de TODOS los links de la página, no solo los que están
             #    dentro de los bloques. Agrupamos rutas idénticas (ya
@@ -523,7 +546,7 @@ def raspar_grupo(page, url_grupo, vistos, max_posts=5):
                 ruta = urllib.parse.urlparse(h).path
                 if not ruta or ruta == "/":
                     continue
-                patron = enmascarar_digitos(ruta)
+                patron = sanear_para_log(ruta)
                 conteo_rutas[patron] = conteo_rutas.get(patron, 0) + 1
             for patron, veces in sorted(
                 conteo_rutas.items(), key=lambda kv: kv[1], reverse=True
@@ -540,7 +563,7 @@ def raspar_grupo(page, url_grupo, vistos, max_posts=5):
             )
             print(
                 "   🔎 Rutas candidatas a publicación dentro del grupo:"
-                f" {sospechosas[:20] if sospechosas else 'ninguna'}",
+                f" {lista_para_log(sospechosas[:20])}",
                 flush=True,
             )
 
@@ -564,7 +587,7 @@ def raspar_grupo(page, url_grupo, vistos, max_posts=5):
 
         for idx, (pid, post_url) in enumerate(posts_pendientes[:total], 1):
             iid = f"GRUPO_{pid}"
-            print(f"   [{idx}/{total}] Abriendo post del grupo ID {pid}...", flush=True)
+            print(f"   {idx}/{total} · Abriendo post del grupo ID {pid}...", flush=True)
             try:
                 page.goto(post_url, timeout=25000, wait_until="domcontentloaded")
                 page.wait_for_timeout(2500)
@@ -663,7 +686,7 @@ def raspar():
 
         # 1. PUBLICACIONES PRIORITARIAS (SI EXISTIERAN NUEVAS)
         for idx, url_prio in enumerate(URLS_PRIORITARIAS, 1):
-            print(f"\n[PRIORITARIO {idx}/{len(URLS_PRIORITARIAS)}] Abriendo: {url_prio}", flush=True)
+            print(f"\nPRIORITARIO {idx}/{len(URLS_PRIORITARIAS)} · Abriendo: {url_prio}", flush=True)
             try:
                 page.goto(url_prio, timeout=35000, wait_until="domcontentloaded")
                 page.wait_for_timeout(3000)
@@ -749,7 +772,7 @@ def raspar():
 
                 for idx, iid in enumerate(iids_pendientes[:total_termino], 1):
                     post_url = f"https://www.facebook.com/marketplace/item/{iid}/"
-                    print(f"   [{idx}/{total_termino}] Abriendo ID {iid}...", flush=True)
+                    print(f"   {idx}/{total_termino} · Abriendo ID {iid}...", flush=True)
 
                     try:
                         page.goto(post_url, timeout=20000, wait_until="domcontentloaded")
