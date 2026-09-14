@@ -6,16 +6,13 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from playwright.sync_api import sync_playwright
 
-# ==========================================
-# CONFIGURACIÓN
-# ==========================================
+# Variables de entorno
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN") or "8578108762:AAHw2jIcKs8L8X44DxIQ7tjZTgscN2rjYKI"
 CHAT_ID = os.environ.get("CHAT_ID") or "5171466462"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or "AQ.Ab8RN6JkWi0bJzcYFn6B2WZyIiluwrbrun7NfjZAT-tcurxdbA"
 GEMINI_MODEL = "gemini-3.6-flash"
 FB_COOKIES = os.environ.get("FB_COOKIES")
 
-# 1. Enviar alerta a Telegram
 def enviar_alerta(titulo, precio, rating_bgg, rank_bgg, peso_bgg, url_post, thumbnail=None):
     mensaje = (
         f"🎲 <b>¡JUEGO DETECTADO EN MARKETPLACE!</b> 🎲\n\n"
@@ -41,7 +38,6 @@ def enviar_alerta(titulo, precio, rating_bgg, rank_bgg, peso_bgg, url_post, thum
 
     return _post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", {"chat_id": CHAT_ID, "text": mensaje, "parse_mode": "HTML", "disable_web_page_preview": False}).get("ok", False)
 
-# 2. Consultar BoardGameGeek
 def consultar_bgg(nombre_juego):
     try:
         url_search = f"https://boardgamegeek.com/xmlapi2/search?{urllib.parse.urlencode({'query': nombre_juego, 'type': 'boardgame'})}"
@@ -91,7 +87,6 @@ def consultar_bgg(nombre_juego):
         print(f"Error BGG ({nombre_juego}): {e}")
         return None
 
-# 3. Extraer con Gemini 3.6 Flash
 def extraer_juegos_con_ia(texto):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     prompt = (
@@ -113,7 +108,6 @@ def extraer_juegos_con_ia(texto):
         print(f"Error IA: {e}")
         return []
 
-# 4. Historial de vistos
 def cargar_posts_vistos(db_path="vistos.json"):
     if os.path.exists(db_path):
         with open(db_path, "r", encoding="utf-8") as f:
@@ -124,7 +118,6 @@ def guardar_posts_vistos(vistos, db_path="vistos.json"):
     with open(db_path, "w", encoding="utf-8") as f:
         json.dump(list(vistos), f, indent=2)
 
-# 5. Ejecución con Playwright y sesión activa
 def raspar_marketplace():
     vistos = cargar_posts_vistos()
     nuevos_encontrados = 0
@@ -135,11 +128,10 @@ def raspar_marketplace():
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800},
+            viewport={"width": 1280, "height": 900},
             locale="es-GT"
         )
 
-        # Inyección y sanitización de cookies
         if FB_COOKIES:
             try:
                 raw_cookies = json.loads(FB_COOKIES)
@@ -164,31 +156,54 @@ def raspar_marketplace():
                     clean_cookies.append(cookie)
 
                 context.add_cookies(clean_cookies)
-                print("✅ Cookies de sesión inyectadas exitosamente en el navegador.")
+                print("✅ Cookies de sesión inyectadas exitosamente.")
             except Exception as e:
                 print(f"⚠️ Error al inyectar cookies: {e}")
-        else:
-            print("⚠️ No se encontró la variable FB_COOKIES.")
 
         page = context.new_page()
-        print("Navegando a Marketplace con sesión...")
+        print("Navegando a Marketplace...")
 
         try:
-            page.goto(url_busqueda, timeout=40000)
-            page.wait_for_timeout(4000)
+            page.goto(url_busqueda, timeout=45000)
+            page.wait_for_timeout(5000)
 
-            # Scroll para forzar la carga de publicaciones
-            page.evaluate("window.scrollBy(0, 1000)")
-            page.wait_for_timeout(3000)
+            # Cerrar posibles modales de 'Ahora no' o avisos de Facebook
+            try:
+                page.keyboard.press("Escape")
+                for selector in [
+                    '[aria-label="Cerrar"]',
+                    '[aria-label="Close"]',
+                    'div[role="button"]:has-text("Ahora no")',
+                    'div[role="button"]:has-text("Not Now")',
+                    'div[role="button"]:has-text("De acuerdo")',
+                    'div[role="button"]:has-text("Aceptar")'
+                ]:
+                    boton = page.query_selector(selector)
+                    if boton:
+                        boton.click()
+                        page.wait_for_timeout(1000)
+            except Exception:
+                pass
+
+            # Scroll hacia abajo para forzar la carga del feed
+            for _ in range(2):
+                page.evaluate("window.scrollBy(0, 800)")
+                page.wait_for_timeout(2000)
 
             print(f"Página: '{page.title()}' | URL: {page.url}")
 
-            enlaces = page.query_selector_all('a[href*="/item/"]')
+            # Buscar todas las publicaciones en Marketplace
+            enlaces = page.query_selector_all('a[href*="/item/"], a[href*="/marketplace/item/"]')
             print(f"Se encontraron {len(enlaces)} publicaciones visibles.")
+
+            # Si sigue en 0, imprimimos el texto para ver qué muestra la pantalla
+            if not enlaces:
+                texto_body = page.inner_text("body")[:350]
+                print("Texto visible en la página:\n", texto_body)
 
             for enlace in enlaces[:15]:
                 href = enlace.get_attribute("href")
-                if not href:
+                if not href or "/item/" not in href:
                     continue
 
                 item_id = href.split("/item/").split("/")[0].split("?")[0]
@@ -200,7 +215,7 @@ def raspar_marketplace():
                 texto_tarjeta = enlace.inner_text()
 
                 print(f"\nProcesando ID {item_id}...")
-                print(f"Texto: {texto_tarjeta[:100]}...")
+                print(f"Texto: {texto_tarjeta[:120]}...")
 
                 items_detectados = extraer_juegos_con_ia(texto_tarjeta)
 
@@ -236,4 +251,4 @@ def raspar_marketplace():
 
 if __name__ == "__main__":
     raspar_marketplace()
-        
+    
