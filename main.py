@@ -26,10 +26,9 @@ GMAIL_APP_PASS = os.environ.get("GMAIL_APP_PASS")
 # 1. Enlaces prioritarios (deja vacío; solo añade si tienes un post nuevo puntual)
 URLS_PRIORITARIAS = []
 
-# 2. Grupos de Facebook a rastrear
-# Nota: Si el ID '1DbWMRMEfa' falla, reemplázalo por la URL normal de escritorio del grupo.
+# 2. Grupos de Facebook a rastrear (usa la URL de www.facebook.com/groups/<id-o-nombre>/)
 URLS_GRUPOS = [
-    "https://www.facebook.com/groups/1DbWMRMEfa/?sorting_setting=CHRONOLOGICAL",
+    "https://www.facebook.com/groups/boardgamesgt/",
 ]
 
 # 3. Términos de búsqueda en Marketplace (Mixco / Guatemala)
@@ -362,25 +361,32 @@ def descargar_fotos_reales(page, iid):
 
 
 def resolver_url_grupo(page, url_grupo):
-    """Si url_grupo es un link de invitación corto (facebook.com/share/g/<code>/
-    o una URL con ese mismo código pegado a /groups/), lo visita y deja que
-    Facebook redirija a la URL canónica /groups/<id_numerico>/. Devuelve esa
-    URL canónica (con orden cronológico aplicado) para usarla en el scraping.
-    Si ya era una URL válida de grupo, la devuelve intacta.
+    """Normaliza la URL de un grupo de Facebook a la versión de www.facebook.com
+    con orden cronológico, aceptando tanto IDs numéricos (/groups/123456789/)
+    como nombres de vanity (/groups/boardgamesgt/). Si url_grupo es un link de
+    invitación corto (facebook.com/share/g/<code>/), lo visita primero y deja
+    que Facebook redirija a la URL canónica.
     """
+    m_directo = re.search(r"facebook\.com/groups/([^/?]+)", url_grupo)
+    if m_directo:
+        identificador = m_directo.group(1)
+        return f"https://www.facebook.com/groups/{identificador}/?sorting_setting=CHRONOLOGICAL"
+
+    # No vino con /groups/<algo>/ directo (ej. un link de invitación /share/g/...):
+    # lo visitamos y vemos a dónde redirige Facebook.
     page.goto(url_grupo, timeout=40000, wait_until="domcontentloaded")
     page.wait_for_timeout(2000)
 
-    m = re.search(r"/groups/(\d+)", page.url)
+    m = re.search(r"facebook\.com/groups/([^/?]+)", page.url)
     if m:
-        gid = m.group(1)
-        return f"https://www.facebook.com/groups/{gid}/?sorting_setting=CHRONOLOGICAL"
+        identificador = m.group(1)
+        return f"https://www.facebook.com/groups/{identificador}/?sorting_setting=CHRONOLOGICAL"
 
     print(
-        f"   ⚠️ No se pudo resolver un ID de grupo numérico desde: {url_grupo}\n"
+        f"   ⚠️ No se pudo resolver un ID/nombre de grupo desde: {url_grupo}\n"
         f"      URL final tras la redirección: {page.url}\n"
         "      Reemplaza URLS_GRUPOS por la URL de escritorio del grupo"
-        " (facebook.com/groups/<numero>/).",
+        " (facebook.com/groups/<numero-o-nombre>/).",
         flush=True,
     )
     return None
@@ -412,17 +418,21 @@ def raspar_grupo(page, url_grupo, vistos, max_posts=5):
             "unirte al grupo",
             "join group",
             "solicitar unirse",
-            "contenido no disponible",
+            "no está disponible en este momento",
+            "no esta disponible en este momento",
             "content isn't available",
         ]
         if any(ind in texto_pagina.lower() for ind in indicadores_sin_acceso):
             print(
-                "   ⚠️ Parece que la cuenta de FB_COOKIES NO es miembro de este"
-                " grupo (se detectó texto de 'unirse al grupo'). Sin membresía"
-                " no se puede ver el feed completo.",
+                "   ⚠️ Facebook no está entregando el contenido del grupo a esta"
+                " sesión (mensaje de 'contenido no disponible' o 'únete al"
+                " grupo'). El link de invitación puede haber expirado, o la"
+                " sesión automatizada recibe un trato distinto al de un"
+                " navegador normal logueado con la misma cuenta.",
                 flush=True,
             )
 
+        print(f"   URL resuelta usada: {url_resuelta}", flush=True)
         print(f"   Título de la página cargada: {titulo_pagina!r}", flush=True)
         print(f"   Primeros 500 caracteres visibles: {texto_pagina!r}", flush=True)
 
@@ -613,7 +623,10 @@ def raspar():
         # 3. BARRIDO DE TÉRMINOS EN MARKETPLACE (Juegos de mesa y D&D)
         for termino in TERMINOS_BUSQUEDA:
             url_encoded = urllib.parse.quote(termino)
-            url_busqueda = f"https://www.facebook.com/marketplace/mixco-guatemala/search/?query={url_encoded}"
+            url_busqueda = (
+                "https://www.facebook.com/marketplace/mixco-guatemala/search/"
+                f"?query={url_encoded}&sortBy=creation_time_descend"
+            )
             print(f"\n🔍 Buscando en Marketplace: '{termino}'...", flush=True)
 
             try:
