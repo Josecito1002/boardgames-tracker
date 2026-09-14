@@ -2,6 +2,7 @@ name: Revision Marketplace Juegos de Mesa
 
 on:
   schedule:
+    # 4 veces al día (8:00, 13:00, 18:00 y 22:00 hora de Guatemala)
     - cron: '0 0,4,14,19 * * *'
   workflow_dispatch:
 
@@ -21,16 +22,17 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Instalar dependencias
+      - name: Instalar dependencias y Playwright
         run: |
-          pip install beautifulsoup4
+          pip install playwright
+          playwright install chromium --with-deps
 
       - name: Ejecutar revision de Marketplace
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
+          FB_COOKIES: ${{ secrets.FB_COOKIES }}
         run: |
           python main.py
 
