@@ -13,6 +13,9 @@ from PIL import Image
 from playwright.sync_api import sync_playwright
 import pytesseract
 
+# ==========================================
+# CONFIGURACIÓN Y CREDENCIALES
+# ==========================================
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID") or "5171466462"
 FB_COOKIES = os.environ.get("FB_COOKIES")
@@ -20,24 +23,23 @@ FB_COOKIES = os.environ.get("FB_COOKIES")
 GMAIL_USER = os.environ.get("GMAIL_USER")
 GMAIL_APP_PASS = os.environ.get("GMAIL_APP_PASS")
 
-# 1. Enlaces prioritarios específicos
-URLS_PRIORITARIAS = [
-    "https://www.facebook.com/share/1Bv2FzgV1B/",
-]
+# 1. Enlaces prioritarios (deja vacío; solo añade si tienes un post nuevo puntual)
+URLS_PRIORITARIAS = []
 
 # 2. Grupos de Facebook a rastrear
 URLS_GRUPOS = [
     "https://www.facebook.com/share/g/1DbWMRMEfa/",
 ]
 
-# 3. Términos de búsqueda en Marketplace (Juegos de mesa y Dungeons & Dragons)
+# 3. Términos de búsqueda en Marketplace (Mixco / Guatemala)
 TERMINOS_BUSQUEDA = [
     "juegos de mesa",
     "dungeons and dragons",
     "d&d libros",
 ]
 
-PALABRAS_MUEBLES = [
+# Palabras que descartan publicaciones ajenas
+PALABRAS_DESCARTAR = [
     "comedor",
     "tocador",
     "cabecera",
@@ -52,40 +54,50 @@ PALABRAS_MUEBLES = [
     "ropero",
     "closet",
     "cocina",
+    "dragon ball",
+    "trompo",
+    "trompos",
+    "mcfarlane",
+    "burger king",
+    "lamparas de metal",
+    "alquiler de juegos",
+]
+
+# Palabras que salvan la publicación si coincide con juegos de mesa o rol
+PALABRAS_CLAVE_JUEGO = [
+    "catan",
+    "cartas",
+    "tablero",
+    "bgg",
+    "hasbro",
+    "devir",
+    "monopoly",
+    "carcassonne",
+    "clue",
+    "basta",
+    "splendor",
+    "dixit",
+    "risk",
+    "terra mystica",
+    "dungeons",
+    "d&d",
+    "dnd",
+    "board game",
+    "manual del jugador",
+    "guia del dungeon master",
 ]
 
 
-def es_mueble(texto):
+def es_publicacion_descartable(texto):
   t = texto.lower()
-  if any(m in t for m in PALABRAS_MUEBLES):
-    if not any(
-        j in t
-        for j in [
-            "catan",
-            "cartas",
-            "tablero",
-            "bgg",
-            "hasbro",
-            "devir",
-            "monopoly",
-            "carcassonne",
-            "clue",
-            "basta",
-            "splendor",
-            "dixit",
-            "risk",
-            "terra mystica",
-            "dungeons",
-            "d&d",
-            "dnd",
-        ]
-    ):
+  if any(p in t for p in PALABRAS_DESCARTAR):
+    if not any(j in t for j in PALABRAS_CLAVE_JUEGO):
       return True
   return False
 
 
 def limpiar_texto_marketplace(texto_crudo):
-  """Corta únicamente bloques estructurales reales con salto de línea."""
+  """Corta únicamente bloques estructurales de Facebook sin dañar la descripción."""
   t = texto_crudo
   cortes = [
       "\nSugerencias de hoy",
@@ -100,7 +112,7 @@ def limpiar_texto_marketplace(texto_crudo):
 
 
 def expandir_todo_el_texto(page):
-  """Hace clic en todos los 'Ver más' visibles y espera que cargue el texto completo."""
+  """Despliega todos los botones 'Ver más' para obtener el catálogo completo."""
   try:
     botones = page.query_selector_all('div[role="button"]:has-text("Ver más")')
     for btn in botones:
@@ -176,7 +188,7 @@ def enviar_publicacion_correo(
         <html>
           <body style="font-family: Arial, sans-serif; color: #222;">
             <h2>🎲 Publicación detectada: ID {iid}</h2>
-            <p><b>Enlace:</b> <a href="{url_post}">{url_post}</a></p>
+            <p><b>Enlace directo:</b> <a href="{url_post}">{url_post}</a></p>
             <hr>
             <h3>Descripción limpia de la publicación:</h3>
             <pre style="background: #f4f4f4; padding: 12px; border-radius: 6px; white-space: pre-wrap; font-size: 14px;">{texto_post}</pre>
@@ -211,7 +223,10 @@ def enviar_publicacion_correo(
       server.login(GMAIL_USER, GMAIL_APP_PASS)
       server.sendmail(GMAIL_USER, GMAIL_USER, msg.as_string())
 
-    print(f"📧 Correo enviado para ID {iid} con {len(rutas_imgs)} fotos.")
+    print(
+        f"📧 Correo enviado para ID {iid} con {len(rutas_imgs)} fotos.",
+        flush=True,
+    )
     return True
   except Exception as e:
     print(f"Error al enviar correo: {e}", flush=True)
@@ -240,7 +255,7 @@ def _descargar_foto_con_reintentos(src, ruta_archivo, intentos=3, timeout=10):
           ruta_archivo = ruta_archivo.replace(".jpg", ".webp")
         data = resp.read()
         if len(data) < 2000:
-          raise ValueError("archivo muy pequeño")
+          raise ValueError("archivo demasiado pequeño")
         with open(ruta_archivo, "wb") as f:
           f.write(data)
         return ruta_archivo
@@ -252,7 +267,7 @@ def _descargar_foto_con_reintentos(src, ruta_archivo, intentos=3, timeout=10):
 
 
 def descargar_fotos_reales(page, iid):
-  """Descarga fotos originales de la publicación usando miniaturas y teclado."""
+  """Descarga todas las fotos originales de la publicación."""
   rutas = []
   ids_vistos = set()
 
@@ -281,7 +296,7 @@ def descargar_fotos_reales(page, iid):
   except Exception:
     pass
 
-  # Miniaturas
+  # Estrategia 1: Miniaturas
   miniaturas = page.query_selector_all(
       'div[role="main"] [role="button"]:has(img),'
       ' div[role="main"] [aria-label*="miniatura"],'
@@ -300,7 +315,7 @@ def descargar_fotos_reales(page, iid):
       except Exception:
         continue
 
-  # Carrusel con teclado si hay pocas
+  # Estrategia 2: Teclado si no hubo miniaturas
   if len(rutas) <= 1:
     intentos_sin_avance = 0
     for _ in range(12):
@@ -331,7 +346,7 @@ def descargar_fotos_reales(page, iid):
 
 
 def raspar_grupo(page, url_grupo, vistos, max_posts=5):
-  """Entra al grupo de Facebook y analiza las publicaciones de venta recientes."""
+  """Rastrea publicaciones de venta en el grupo de Facebook."""
   print(f"\n👥 Accediendo al grupo de Facebook: {url_grupo}...", flush=True)
   try:
     page.goto(url_grupo, timeout=40000, wait_until="domcontentloaded")
@@ -384,7 +399,7 @@ def raspar_grupo(page, url_grupo, vistos, max_posts=5):
         )
         texto_limpio = limpiar_texto_marketplace(texto_crudo)
 
-        if es_mueble(texto_limpio):
+        if es_publicacion_descartable(texto_limpio):
           vistos.add(pid)
           continue
 
@@ -462,7 +477,7 @@ def raspar():
 
     page = ctx.new_page()
 
-    # 1. PUBLICACIONES PRIORITARIAS
+    # 1. PUBLICACIONES PRIORITARIAS (SI EXISTIERAN NUEVAS)
     for idx, url_prio in enumerate(URLS_PRIORITARIAS, 1):
       print(
           f"\n[PRIORITARIO {idx}/{len(URLS_PRIORITARIAS)}] Abriendo:"
@@ -511,11 +526,11 @@ def raspar():
             f"Error en publicación prioritaria {url_prio}: {e_prio}", flush=True
         )
 
-    # 2. RASTREO EN GRUPOS DE FACEBOOK
+    # 2. RASTREO EN EL GRUPO DE FACEBOOK GUATEMALA
     for url_g in URLS_GRUPOS:
       raspar_grupo(page, url_g, vistos)
 
-    # 3. BARRIDO DE BÚSQUEDAS EN MARKETPLACE
+    # 3. BARRIDO DE TÉRMINOS EN MARKETPLACE (Juegos de mesa y D&D)
     for termino in TERMINOS_BUSQUEDA:
       url_encoded = urllib.parse.quote(termino)
       url_busqueda = f"https://www.facebook.com/marketplace/mixco-guatemala/search/?query={url_encoded}"
@@ -542,7 +557,7 @@ def raspar():
             if (
                 iid not in vistos
                 and iid not in iids_pendientes
-                and not es_mueble(txt)
+                and not es_publicacion_descartable(txt)
             ):
               iids_pendientes.append(iid)
 
@@ -564,7 +579,7 @@ def raspar():
                 main_el.inner_text() if main_el else page.inner_text("body")
             )
 
-            if es_mueble(texto_crudo):
+            if es_publicacion_descartable(texto_crudo):
               vistos.add(iid)
               continue
 
