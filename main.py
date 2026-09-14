@@ -22,8 +22,6 @@ GMAIL_APP_PASS = os.environ.get("GMAIL_APP_PASS")
 
 # 1. Enlaces prioritarios específicos
 URLS_PRIORITARIAS = [
-    "https://www.facebook.com/share/1Ljt24Gr7u/",
-    "https://www.facebook.com/share/1Hp3k4feUm/",
     "https://www.facebook.com/share/1Bv2FzgV1B/",
 ]
 
