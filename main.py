@@ -128,7 +128,7 @@ def ejecutar_revision():
     vistos = cargar_posts_vistos()
     nuevos_encontrados = 0
 
-    url_objetivo = "https://www.facebook.com/marketplace/guatemala/search?query=juegos%20de%20mesa&sortBy=creation_time_descend"
+    url_objetivo = "https://m.facebook.com/marketplace/guatemala/search/?query=juegos%20de%20mesa&sortBy=creation_time_descend"
     params = urllib.parse.urlencode({
         "api_key": SCRAPER_API_KEY,
         "url": url_objetivo,
@@ -139,7 +139,7 @@ def ejecutar_revision():
     print("Consultando Facebook Marketplace via ScraperAPI con IP residencial...")
     try:
         req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=120) as resp:
             html = resp.read().decode("utf-8")
 
         soup = BeautifulSoup(html, "html.parser")
