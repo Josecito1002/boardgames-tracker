@@ -402,14 +402,47 @@ def raspar_grupo(page, url_grupo, vistos, max_posts=5):
         except Exception:
             pass
 
+        # Diagnóstico: ¿la cuenta puede ver el feed del grupo, o solo la
+        # pantalla de "unirte"? Esto se imprime siempre para poder revisar
+        # el log sin tener que adivinar.
+        titulo_pagina = page.title()
+        texto_pagina = page.inner_text("body")[:500].replace("\n", " ")
+        indicadores_sin_acceso = [
+            "unirse al grupo",
+            "unirte al grupo",
+            "join group",
+            "solicitar unirse",
+            "contenido no disponible",
+            "content isn't available",
+        ]
+        if any(ind in texto_pagina.lower() for ind in indicadores_sin_acceso):
+            print(
+                "   ⚠️ Parece que la cuenta de FB_COOKIES NO es miembro de este"
+                " grupo (se detectó texto de 'unirse al grupo'). Sin membresía"
+                " no se puede ver el feed completo.",
+                flush=True,
+            )
+
+        print(f"   Título de la página cargada: {titulo_pagina!r}", flush=True)
+        print(f"   Primeros 500 caracteres visibles: {texto_pagina!r}", flush=True)
+
         for _ in range(4):
             page.evaluate("window.scrollBy(0, 1200)")
             page.wait_for_timeout(1500)
+
+        articulos = page.query_selector_all('div[role="article"]')
+        print(
+            f"   Bloques de publicación (div[role=article]) detectados:"
+            f" {len(articulos)}",
+            flush=True,
+        )
 
         enlaces = page.query_selector_all(
             'a[href*="/posts/"], a[href*="/permalink/"],'
             ' a[href*="/multi_permalinks/"]'
         )
+        print(f"   Links con /posts|permalink| detectados: {len(enlaces)}", flush=True)
+
         posts_pendientes = []
         for a in enlaces:
             href = a.get_attribute("href") or ""
