@@ -8,9 +8,26 @@ CHAT_ID = os.environ.get("CHAT_ID") or "5171466462"
 GEMINI_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
 FB_COOKIES = os.environ.get("FB_COOKIES")
 
+# Enlaces prioritarios compartidos (se analizan de primero y completos)
+URLS_PRIORITARIAS = [
+    "https://www.facebook.com/share/1Ljt24Gr7u/",
+    "https://www.facebook.com/share/1Hp3k4feUm/"
+]
+
+# Lista de deseos (Wishlist personal)
+WISHLIST = [
+    "binding of isaac",
+    "four souls",
+    "slay the spire"
+]
+
+def es_wishlist(nombre):
+    nom = nombre.lower()
+    return any(w in nom for w in WISHLIST)
+
 CSV_FILE = "historial_juegos.csv"
 CAMPOS_CSV = [
-    "Fecha", "Juego", "Precio Marketplace (GTQ)", "Precio Texto", "Origen Precio",
+    "Fecha", "Juego", "En Wishlist", "Precio Marketplace (GTQ)", "Precio Texto", "Origen Precio",
     "Buena Oferta (>= 35% ahorro)", "Precio Amazon (USD)", "Equivalente Amazon (GTQ)",
     "Ahorro Estimado (%)", "BGG Rating", "BGG Complejidad", "ID Publicacion", "Enlace Marketplace"
 ]
@@ -23,7 +40,7 @@ PALABRAS_MUEBLES = [
 def es_mueble(texto):
     t = texto.lower()
     if any(m in t for m in PALABRAS_MUEBLES):
-        if not any(j in t for j in ["catan", "cartas", "tablero", "bgg", "hasbro", "devir", "monopoly", "carcassonne", "clue", "basta", "splendor", "dixit", "risk"]):
+        if not any(j in t for j in ["catan", "cartas", "tablero", "bgg", "hasbro", "devir", "monopoly", "carcassonne", "clue", "basta", "splendor", "dixit", "risk", "terra mystica"]):
             return True
     return False
 
@@ -46,10 +63,12 @@ def registrar_en_csv(item_data, post_url, iid):
                 ahorro_str = f"{ahorro_num}%"
 
             es_buena_oferta = "SÍ" if (ahorro_num is not None and ahorro_num >= 35) else "NO"
+            nombre = item_data.get("juego", "Desconocido")
 
             writer.writerow({
                 "Fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                "Juego": item_data.get("juego", "Desconocido"),
+                "Juego": nombre,
+                "En Wishlist": "SÍ" if es_wishlist(nombre) else "NO",
                 "Precio Marketplace (GTQ)": p_post or "",
                 "Precio Texto": item_data.get("precio_estimado_post", ""),
                 "Origen Precio": item_data.get("origen_precio", ""),
@@ -94,10 +113,11 @@ def alerta(item_data, url_post, thumb=None):
     rating = item_data.get("rating_bgg")
     peso = item_data.get("peso_bgg")
 
-    amazon_str = ""
-    ahorro_str = ""
+    badge_wishlist = "🌟 <b>[¡EN TU WISHLIST!]</b> 🌟\n" if es_wishlist(nombre) else ""
     badge_oferta = ""
 
+    amazon_str = ""
+    ahorro_str = ""
     if p_usd and p_usd > 0:
         equiv_gtq = p_usd * 7.80
         amazon_str = f"🛒 <b>Precio nuevo en Amazon:</b> ~${p_usd:.2f} USD (~Q{equiv_gtq:.0f} GTQ)\n"
@@ -115,6 +135,7 @@ def alerta(item_data, url_post, thumb=None):
 
     msg = (
         f"🎲 <b>{nombre.upper()}</b>\n\n"
+        f"{badge_wishlist}"
         f"{badge_oferta}"
         f"💰 <b>Precio Marketplace:</b> {p_estimado}\n"
         f"📍 <b>Origen precio:</b> {origen}\n"
@@ -135,18 +156,19 @@ def alerta(item_data, url_post, thumb=None):
         except Exception: pass
     return tg_send(msg) is not None
 
-def extraer_ia(texto_completo, img_urls=None):
+def extraer_ia(texto_completo, img_url=None):
     url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent"
     prompt = (
         "Eres un experto absoluto en juegos de mesa y evaluador de precios en Guatemala.\n"
-        "Analiza esta publicación de Facebook Marketplace (incluye título, precio mostrado, fotos y descripción detallada).\n"
-        "FILTRO DE MUEBLES: Si la publicación es sobre MUEBLES (mesas de comedor, sillas, tocadores, mesas de noche, salas), IGNÓRALA y devuelve: [].\n"
-        "EXHAUSTIVIDAD DE JUEGOS: Si es un anuncio de juegos de mesa, inspecciona las fotos y la descripción y lista TODOS los juegos de mesa encontrados sin omitir ninguno.\n\n"
+        "Analiza esta publicación de Facebook Marketplace (incluye título, precio mostrado, descripción detallada y/o fotos).\n"
+        "REGLA CRÍTICA DE EXHAUSTIVIDAD:\n"
+        "- Si hay una lista en la descripción (ej. 'Juego X - Q50, Juego Y - Q100' o lista alfabética), extrae CADA UNO de los juegos de la lista con su precio exacto sin omitir ninguno.\n"
+        "- Si hay fotos con pilas de cajas o estantes, identifica todos los títulos visibles.\n\n"
         f"Texto de la publicación:\n\"\"\"{texto_completo}\"\"\"\n\n"
         "Para cada juego de mesa encontrado, devuelve:\n"
         "1. 'juego': Nombre oficial del juego.\n"
         "2. 'precio_post': Precio individual numérico en Quetzales (float). Si no tiene precio individual pon null.\n"
-        "3. 'precio_estimado_post': Texto legible del precio (ej. 'Q75', 'Q40', 'Rango Q15 - Q200', 'Ver en post').\n"
+        "3. 'precio_estimado_post': Texto legible del precio (ej. 'Q75', 'Q150', 'Rango Q15 - Q200').\n"
         "4. 'origen_precio': 'Lista en descripción', 'Precio directo del anuncio', o 'Estimado por rango'.\n"
         "5. 'rating_bgg': Calificación BGG aproximada (1 a 10).\n"
         "6. 'peso_bgg': Complejidad BGG (1 a 5).\n"
@@ -156,14 +178,13 @@ def extraer_ia(texto_completo, img_urls=None):
     )
     parts = [{"text": prompt}]
     
-    if img_urls:
-        for u in img_urls[:2]:
-            try:
-                req_img = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req_img, timeout=6) as ir:
-                    b64_img = base64.b64encode(ir.read()).decode("utf-8")
-                    parts.append({"inline_data": {"mime_type": "image/jpeg", "data": b64_img}})
-            except Exception: pass
+    if img_url:
+        try:
+            req_img = urllib.request.Request(img_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req_img, timeout=6) as ir:
+                b64_img = base64.b64encode(ir.read()).decode("utf-8")
+                parts.append({"inline_data": {"mime_type": "image/jpeg", "data": b64_img}})
+        except Exception: pass
 
     payload = {"contents": [{"parts": parts}], "generationConfig": {"response_mime_type": "application/json"}}
     headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY}
@@ -171,13 +192,13 @@ def extraer_ia(texto_completo, img_urls=None):
 
     for intento in range(4):
         try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with urllib.request.urlopen(req, timeout=25) as resp:
                 raw_txt = json.loads(resp.read().decode())["candidates"][0]["content"]["parts"][0]["text"]
                 return json.loads(raw_txt)
         except urllib.error.HTTPError as e:
             if e.code == 429:
-                print(f"⏳ Límite 429. Pausa de 30s (intento {intento+1}/4)...", flush=True)
-                time.sleep(30)
+                print(f"⏳ Límite 429. Pausa de 40s para recargar cuota (intento {intento+1}/4)...", flush=True)
+                time.sleep(40)
             else:
                 print(f"Error IA: {e}", flush=True)
                 return []
@@ -189,12 +210,10 @@ def extraer_ia(texto_completo, img_urls=None):
 def raspar():
     vistos = set()
     juegos_notificados_hoy = set()
-    
-    # Búsqueda abierta centrada en Mixco (cubre Mixco, Guatemala, Villa Nueva, San Lucas, Petapa)
     url_busqueda = "https://www.facebook.com/marketplace/mixco-guatemala/search/?query=juegos%20de%20mesa"
 
-    print("Iniciando búsqueda centrada en Mixco...", flush=True)
-    status_id = tg_send("📡 <b>Iniciando búsqueda en Marketplace (Mixco y alrededores)...</b>\nBuscando lotes y colecciones de juegos de mesa...")
+    print("Iniciando revisión con enlaces prioritarios y Wishlist...", flush=True)
+    status_id = tg_send("📡 <b>Iniciando búsqueda en Marketplace...</b>\nProcesando primero publicaciones prioritarias y buscando títulos de Wishlist...")
 
     with sync_playwright() as p:
         b = p.chromium.launch(headless=True)
@@ -219,8 +238,67 @@ def raspar():
             except Exception as e: print("Error cookies:", e, flush=True)
 
         page = ctx.new_page()
+        items_procesados = 0
+
+        # ==========================================
+        # 1. ANALIZAR PRIMERO LOS ENLACES PRIORITARIOS
+        # ==========================================
+        for idx, url_prio in enumerate(URLS_PRIORITARIAS, 1):
+            print(f"\n[PRIORITARIO {idx}/{len(URLS_PRIORITARIAS)}] Abriendo: {url_prio}", flush=True)
+            tg_edit(status_id, f"⭐ <b>Analizando publicación prioritaria {idx}/{len(URLS_PRIORITARIAS)}...</b>\nLeyendo lista completa de juegos...")
+            try:
+                page.goto(url_prio, timeout=35000, wait_until="domcontentloaded")
+                page.wait_for_timeout(3000)
+
+                real_url = page.url
+                m = re.search(r"/item/(\d+)", real_url)
+                iid = m.group(1) if m else f"prio_{idx}"
+
+                try:
+                    ver_mas = page.query_selector('div[role="main"] div[role="button"]:has-text("Ver más")')
+                    if ver_mas: ver_mas.click(); page.wait_for_timeout(500)
+                except Exception: pass
+
+                main_el = page.query_selector('div[role="main"]')
+                texto_completo = main_el.inner_text() if main_el else page.inner_text("body")
+
+                img_elem = page.query_selector('div[role="main"] img')
+                img_url = img_elem.get_attribute("src") if img_elem else None
+
+                # Si la descripción ya trae una lista larga en texto, pasamos solo texto para no saturar cuota
+                foto_para_ia = None if len(texto_completo) > 200 else img_url
+
+                print(f"Consultando IA para publicación prioritaria ID {iid}...", flush=True)
+                items_ia = extraer_ia(texto_completo[:3000], img_url=foto_para_ia)
+
+                if items_ia:
+                    vistos.add(iid)
+
+                for item in items_ia:
+                    nom = item.get("juego", "").strip()
+                    p = item.get("precio_post")
+
+                    registrar_en_csv(item, real_url, iid)
+
+                    clave = re.sub(r'[^a-z0-9]', '', nom.lower())
+                    if not clave or clave in juegos_notificados_hoy:
+                        continue
+
+                    if es_wishlist(nom) or (p and p >= 15.0) or (not p and nom):
+                        juegos_notificados_hoy.add(clave)
+                        print(f"🚨 Alerta enviada: {nom}", flush=True)
+                        alerta(item, real_url, img_url)
+                        items_procesados += 1
+
+                time.sleep(16)
+            except Exception as e_prio:
+                print(f"Error en enlace prioritario {url_prio}: {e_prio}", flush=True)
+
+        # ==========================================
+        # 2. CONTINUAR CON EL BARRIDO DE MARKETPLACE
+        # ==========================================
         try:
-            print("Cargando Marketplace Mixco...", flush=True)
+            print("\nCargando Marketplace Mixco para otras publicaciones...", flush=True)
             page.goto(url_busqueda, timeout=45000, wait_until="domcontentloaded")
             page.wait_for_timeout(3000)
 
@@ -231,46 +309,30 @@ def raspar():
                     if btn: btn.click(); page.wait_for_timeout(500)
             except Exception: pass
 
-            for _ in range(6):
+            for _ in range(5):
                 page.evaluate("window.scrollBy(0, 1500)")
                 page.wait_for_timeout(1800)
 
             enlaces = page.query_selector_all('a[href*="/marketplace/item/"], a[href*="/item/"]')
-            
-            items_encontrados = []
-            vistos_temp = set()
+            iids_pendientes = []
             for a in enlaces:
                 href = a.get_attribute("href") or ""
                 txt = a.inner_text().strip()
                 m = re.search(r"/item/(\d+)", href)
                 if m:
                     iid = m.group(1)
-                    if iid not in vistos_temp:
-                        vistos_temp.add(iid)
-                        # Descarte previo inmediato si el título dice comedor o muebles
-                        if es_mueble(txt):
-                            print(f"Descartando mueble: {txt[:40]}")
-                            continue
+                    if iid not in vistos and iid not in iids_pendientes:
+                        if es_mueble(txt): continue
+                        iids_pendientes.append(iid)
 
-                        # Prioridad 1 a lotes grandes, liquidaciones y colecciones
-                        es_lote = any(k in txt.lower() for k in ["lote", "liquidacion", "liquidación", "varios", "disponible", "remate", "combo", "coleccion", "colección", "gratis", "q1", "q 1", "super venta"])
-                        items_encontrados.append({
-                            "iid": iid,
-                            "txt": txt,
-                            "prioridad": 1 if es_lote else 2
-                        })
+            total_a_revisar = len(iids_pendientes)
+            print(f"Publicaciones adicionales encontradas: {total_a_revisar}...", flush=True)
+            tg_edit(status_id, f"🔍 <b>Analizando {total_a_revisar} publicaciones adicionales en Mixco...</b>")
 
-            items_encontrados.sort(key=lambda x: x["prioridad"])
-            total_a_revisar = len(items_encontrados)
-            print(f"Total publicaciones válidas encontradas: {total_a_revisar}. Priorizando lotes...", flush=True)
-            tg_edit(status_id, f"🔍 <b>Se encontraron {total_a_revisar} publicaciones de juegos en Mixco y alrededores.</b>\nPriorizando lotes grandes y colecciones...")
-
-            items_procesados = 0
-            for idx, item_info in enumerate(items_encontrados, 1):
-                iid = item_info["iid"]
+            for idx, iid in enumerate(iids_pendientes, 1):
                 post_url = f"https://www.facebook.com/marketplace/item/{iid}/"
-                print(f"\n[{idx}/{total_a_revisar}] Abriendo ID {iid} ({item_info['txt'][:50]}...)", flush=True)
-                tg_edit(status_id, f"⏳ <b>Progreso: {idx}/{total_a_revisar} anuncios</b>\nAnalizando contenido y fotos...")
+                print(f"[{idx}/{total_a_revisar}] Abriendo ID {iid}...", flush=True)
+                tg_edit(status_id, f"⏳ <b>Progreso adicional: {idx}/{total_a_revisar}</b>...")
 
                 try:
                     page.goto(post_url, timeout=20000, wait_until="domcontentloaded")
@@ -285,19 +347,14 @@ def raspar():
                     texto_completo = main_el.inner_text() if main_el else page.inner_text("body")
                     
                     if es_mueble(texto_completo):
-                        print(f"[{idx}/{total_a_revisar}] Descartado en detalle por ser mueble.")
                         vistos.add(iid)
                         continue
 
-                    imgs = page.query_selector_all('div[role="main"] img')
-                    img_urls = []
-                    for im in imgs:
-                        src = im.get_attribute("src") or ""
-                        if "fbcdn.net" in src and "rsrc.php" not in src and src not in img_urls:
-                            img_urls.append(src)
+                    img_elem = page.query_selector('div[role="main"] img')
+                    img_url = img_elem.get_attribute("src") if img_elem else None
 
-                    print(f"[{idx}/{total_a_revisar}] Analizando con IA...", flush=True)
-                    items_ia = extraer_ia(texto_completo[:2000], img_urls=img_urls)
+                    foto_para_ia = None if len(texto_completo) > 200 else img_url
+                    items_ia = extraer_ia(texto_completo[:2000], img_url=foto_para_ia)
 
                     if items_ia:
                         vistos.add(iid)
@@ -312,19 +369,18 @@ def raspar():
                         if not clave or clave in juegos_notificados_hoy:
                             continue
 
-                        if (p and p >= 15.0) or (not p and nom):
+                        if es_wishlist(nom) or (p and p >= 15.0) or (not p and nom):
                             juegos_notificados_hoy.add(clave)
                             print(f"🚨 Alerta: {nom}", flush=True)
-                            foto_alerta = img_urls[0] if img_urls else None
-                            alerta(item, post_url, foto_alerta)
+                            alerta(item, post_url, img_url)
                             items_procesados += 1
 
                 except Exception as ep:
                     print(f"Error al procesar ID {iid}: {ep}", flush=True)
 
-                time.sleep(12)
+                time.sleep(16)
 
-            tg_edit(status_id, f"✅ <b>Barrido finalizado.</b>\nSe analizaron {total_a_revisar} publicaciones, se guardaron en Excel/CSV y se enviaron {items_procesados} alertas.")
+            tg_edit(status_id, f"✅ <b>Barrido completado.</b>\nSe revisaron las publicaciones prioritarias y {total_a_revisar} anuncios de Mixco.\nTotal alertas: {items_procesados}.")
             print(f"Finalizado con éxito. Total alertas: {items_procesados}", flush=True)
         except Exception as e:
             print(f"Error general: {e}", flush=True)
