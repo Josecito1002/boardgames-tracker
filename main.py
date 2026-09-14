@@ -403,13 +403,15 @@ def extraer_publicaciones_del_html(html, slug_grupo):
     plano = html.replace("\\", "")
     ids = []
 
+    # Solo rutas que nombran explícitamente al grupo. Los campos sueltos del
+    # JSON ("post_id", "top_level_post_id", "story_fbid") se probaron y dan
+    # falsos positivos: son IDs de publicaciones destacadas o de otros
+    # contextos, y al abrirlos Facebook redirige al feed del grupo, así que
+    # todas terminaban entregando el MISMO contenido.
     patrones = [
-        r"/groups/[^/\"?\s]+/posts/(\d{8,})",
-        r"/groups/[^/\"?\s]+/permalink/(\d{8,})",
-        r"/groups/[^/\"?\s]+/multi_permalinks/(\d{8,})",
-        r'"post_id":"(\d{8,})"',
-        r'"top_level_post_id":"(\d{8,})"',
-        r"story_fbid[=:\"]+(\d{8,})",
+        rf"/groups/{re.escape(slug_grupo)}/posts/(\d{{8,}})",
+        rf"/groups/{re.escape(slug_grupo)}/permalink/(\d{{8,}})",
+        rf"/groups/{re.escape(slug_grupo)}/multi_permalinks/(\d{{8,}})",
     ]
     for patron in patrones:
         for pid in re.findall(patron, plano):
@@ -420,6 +422,27 @@ def extraer_publicaciones_del_html(html, slug_grupo):
         (pid, f"https://www.facebook.com/groups/{slug_grupo}/posts/{pid}/")
         for pid in ids
     ]
+
+
+def extraer_listings_de_comercio(page):
+    """Saca los anuncios de la pestaña Compraventa del grupo.
+
+    En /buy_sell_discussion/ las ventas no son publicaciones normales: cada
+    tarjeta apunta a /commerce/listing/<id>/ y no existe ningún enlace con
+    /posts/ ni /permalink/. Por eso el scraper no encontraba nada aunque la
+    página tuviera decenas de anuncios cargados.
+    """
+    vistos_ids = []
+    resultados = []
+    for a in page.query_selector_all('a[href*="/commerce/listing/"]'):
+        href = a.get_attribute("href") or ""
+        m = re.search(r"/commerce/listing/(\d{8,})", href)
+        if m and m.group(1) not in vistos_ids:
+            vistos_ids.append(m.group(1))
+            resultados.append(
+                (m.group(1), f"https://www.facebook.com/commerce/listing/{m.group(1)}/")
+            )
+    return resultados
 
 
 def esperar_feed_del_grupo(page, intentos=10):
@@ -435,15 +458,22 @@ def esperar_feed_del_grupo(page, intentos=10):
     except Exception:
         pass
 
+    def _contar():
+        # En la pestaña Compraventa los anuncios no son div role=article, así
+        # que contar solo bloques haría que el scroll se detuviera enseguida.
+        return len(page.query_selector_all('div[role="article"]')) + len(
+            page.query_selector_all('a[href*="/commerce/listing/"]')
+        )
+
     previos = -1
     for _ in range(intentos):
-        actuales = len(page.query_selector_all('div[role="article"]'))
+        actuales = _contar()
         if actuales >= 6 and actuales == previos:
             break
         previos = actuales
         page.evaluate("window.scrollBy(0, 1400)")
         page.wait_for_timeout(2000)
-    return len(page.query_selector_all('div[role="article"]'))
+    return _contar()
 
 
 def resolver_url_grupo(page, url_grupo):
@@ -630,16 +660,25 @@ def raspar_grupo(page, url_grupo, vistos, max_posts=5):
             if m:
                 candidatos.append((m.group(1), href.split("?")[0]))
 
+        if not candidatos:
+            # La pestaña Compraventa publica los anuncios como
+            # /commerce/listing/<id>/, no como publicaciones del grupo.
+            candidatos = extraer_listings_de_comercio(page)
+            print(
+                f"   🔎 Anuncios de Compraventa encontrados:"
+                f" {len(candidatos)}",
+                flush=True,
+            )
+
         slug_grupo = re.search(r"/groups/([^/?]+)", url_resuelta)
         slug_grupo = slug_grupo.group(1) if slug_grupo else None
         if not candidatos and slug_grupo:
-            desde_html = extraer_publicaciones_del_html(page.content(), slug_grupo)
+            candidatos = extraer_publicaciones_del_html(page.content(), slug_grupo)
             print(
                 f"   🔎 IDs de publicación encontrados en el HTML de la"
-                f" página: {len(desde_html)}",
+                f" página: {len(candidatos)}",
                 flush=True,
             )
-            candidatos = desde_html
 
         posts_pendientes = []
         for pid, url_post in candidatos:
@@ -660,6 +699,18 @@ def raspar_grupo(page, url_grupo, vistos, max_posts=5):
             try:
                 page.goto(post_url, timeout=25000, wait_until="domcontentloaded")
                 page.wait_for_timeout(2500)
+
+                # Si el ID no era una publicación real, Facebook redirige al
+                # feed del grupo y se acabaría leyendo el mismo contenido una
+                # y otra vez (así se enviaron 4 correos idénticos). Se
+                # comprueba que la URL final siga apuntando al ID pedido.
+                if pid not in page.url:
+                    print(
+                        f"      ⚠️ Facebook redirigió fuera de la publicación"
+                        f" {pid}; se omite para no reenviar contenido repetido.",
+                        flush=True,
+                    )
+                    continue
 
                 expandir_todo_el_texto(page)
 
