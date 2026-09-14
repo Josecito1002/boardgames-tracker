@@ -1,24 +1,24 @@
 import os
-import re
 import json
 import urllib.request
-import urllib.error
 import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime
-from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
-# Variables de entorno con respaldo automático
+# ==========================================
+# CONFIGURACIÓN
+# ==========================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN") or "8578108762:AAHw2jIcKs8L8X44DxIQ7tjZTgscN2rjYKI"
 CHAT_ID = os.environ.get("CHAT_ID") or "5171466462"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or "AQ.Ab8RN6JkWi0bJzcYFn6B2WZyIiluwrbrun7NfjZAT-tcurxdbA"
 GEMINI_MODEL = "gemini-3.6-flash"
-SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY") or "44a554e4564c3404c3914b50b27b232d"
+FB_COOKIES = os.environ.get("FB_COOKIES")
 
 # 1. Enviar alerta a Telegram
 def enviar_alerta(titulo, precio, rating_bgg, rank_bgg, peso_bgg, url_post, thumbnail=None):
     mensaje = (
-        f"🎲 <b>¡OFERTA / JUEGO DETECTADO!</b> 🎲\n\n"
+        f"🎲 <b>¡JUEGO DETECTADO EN MARKETPLACE!</b> 🎲\n\n"
         f"📦 <b>Juego:</b> {titulo}\n"
         f"💰 <b>Precio:</b> Q{precio:.2f}\n"
         f"⭐ <b>BGG Rating:</b> {rating_bgg or 'N/A'}/10\n"
@@ -91,7 +91,7 @@ def consultar_bgg(nombre_juego):
         print(f"Error BGG ({nombre_juego}): {e}")
         return None
 
-# 3. Extraer juegos con Gemini 3.6 Flash
+# 3. Extraer con Gemini 3.6 Flash
 def extraer_juegos_con_ia(texto):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     prompt = (
@@ -113,7 +113,7 @@ def extraer_juegos_con_ia(texto):
         print(f"Error IA: {e}")
         return []
 
-# 4. Historial de publicaciones vistas
+# 4. Historial de vistos
 def cargar_posts_vistos(db_path="vistos.json"):
     if os.path.exists(db_path):
         with open(db_path, "r", encoding="utf-8") as f:
@@ -124,79 +124,116 @@ def guardar_posts_vistos(vistos, db_path="vistos.json"):
     with open(db_path, "w", encoding="utf-8") as f:
         json.dump(list(vistos), f, indent=2)
 
-# 5. Ejecución principal
-def ejecutar_revision():
+# 5. Ejecución con Playwright y sesión activa
+def raspar_marketplace():
     vistos = cargar_posts_vistos()
     nuevos_encontrados = 0
 
-    url_objetivo = "https://m.facebook.com/marketplace/guatemala/search/?query=juegos%20de%20mesa&sortBy=creation_time_descend"
-    params = urllib.parse.urlencode({
-        "api_key": SCRAPER_API_KEY,
-        "url": url_objetivo,
-        "render": "true"
-    })
-    api_url = f"https://api.scraperapi.com?{params}"
+    url_busqueda = "https://www.facebook.com/marketplace/guatemala/search?query=juegos%20de%20mesa&sortBy=creation_time_descend"
 
-    print("Consultando Facebook Marketplace via ScraperAPI con IP residencial...")
-    try:
-        req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            html = resp.read().decode("utf-8")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 800},
+            locale="es-GT"
+        )
 
-        soup = BeautifulSoup(html, "html.parser")
-        enlaces = soup.find_all("a", href=re.compile(r"/item/\d+"))
-        print(f"Se encontraron {len(enlaces)} publicaciones en la página.")
+        # Inyección y sanitización de cookies
+        if FB_COOKIES:
+            try:
+                raw_cookies = json.loads(FB_COOKIES)
+                clean_cookies = []
+                for c in raw_cookies:
+                    cookie = {
+                        "name": c["name"],
+                        "value": c["value"],
+                        "domain": c.get("domain", ".facebook.com"),
+                        "path": c.get("path", "/")
+                    }
+                    ss = str(c.get("sameSite", "")).lower()
+                    if ss == "strict":
+                        cookie["sameSite"] = "Strict"
+                    elif ss == "lax":
+                        cookie["sameSite"] = "Lax"
+                    elif ss in ["no_restriction", "none"]:
+                        cookie["sameSite"] = "None"
+                        cookie["secure"] = True
+                    elif "secure" in c and c["secure"]:
+                        cookie["secure"] = True
+                    clean_cookies.append(cookie)
 
-        for enlace in enlaces[:15]:
-            href = enlace.get("href", "")
-            match = re.search(r"/item/(\d+)", href)
-            if not match:
-                continue
+                context.add_cookies(clean_cookies)
+                print("✅ Cookies de sesión inyectadas exitosamente en el navegador.")
+            except Exception as e:
+                print(f"⚠️ Error al inyectar cookies: {e}")
+        else:
+            print("⚠️ No se encontró la variable FB_COOKIES.")
 
-            item_id = match.group(1)
-            if item_id in vistos:
-                continue
+        page = context.new_page()
+        print("Navegando a Marketplace con sesión...")
 
-            vistos.add(item_id)
-            post_url = f"https://www.facebook.com/marketplace/item/{item_id}/"
-            texto_tarjeta = " ".join(enlace.stripped_strings)
+        try:
+            page.goto(url_busqueda, timeout=40000)
+            page.wait_for_timeout(4000)
 
-            print(f"\nProcesando publicación ID {item_id}...")
-            print(f"Texto: {texto_tarjeta[:120]}...")
+            # Scroll para forzar la carga de publicaciones
+            page.evaluate("window.scrollBy(0, 1000)")
+            page.wait_for_timeout(3000)
 
-            items_detectados = extraer_juegos_con_ia(texto_tarjeta)
+            print(f"Página: '{page.title()}' | URL: {page.url}")
 
-            for item in items_detectados:
-                nombre = item.get("juego")
-                precio = item.get("precio")
+            enlaces = page.query_selector_all('a[href*="/item/"]')
+            print(f"Se encontraron {len(enlaces)} publicaciones visibles.")
 
-                # Filtro de alerta: Q15 a Q250
-                if precio and 15.0 <= precio <= 250.0:
-                    bgg = consultar_bgg(nombre)
-                    if bgg:
-                        print(f"🚨 Enviando alerta: {bgg['nombre']} a Q{precio}")
-                        enviar_alerta(
-                            titulo=bgg["nombre"],
-                            precio=precio,
-                            rating_bgg=bgg["rating"],
-                            rank_bgg=bgg["rank"],
-                            peso_bgg=bgg["weight"],
-                            url_post=post_url,
-                            thumbnail=bgg["thumbnail"]
-                        )
-                        nuevos_encontrados += 1
-                else:
-                    print(f"Descartado '{nombre}' (precio: Q{precio})")
+            for enlace in enlaces[:15]:
+                href = enlace.get_attribute("href")
+                if not href:
+                    continue
 
-    except urllib.error.HTTPError as e:
-        detalle = e.read().decode("utf-8", errors="ignore")
-        print(f"Error HTTP {e.code} de ScraperAPI: {detalle}")
-    except Exception as e:
-        print(f"Error inesperado al ejecutar la revisión: {e}")
+                item_id = href.split("/item/").split("/")[0].split("?")[0]
+                if item_id in vistos:
+                    continue
+
+                vistos.add(item_id)
+                post_url = f"https://www.facebook.com/marketplace/item/{item_id}/"
+                texto_tarjeta = enlace.inner_text()
+
+                print(f"\nProcesando ID {item_id}...")
+                print(f"Texto: {texto_tarjeta[:100]}...")
+
+                items_detectados = extraer_juegos_con_ia(texto_tarjeta)
+
+                for item in items_detectados:
+                    nombre = item.get("juego")
+                    precio = item.get("precio")
+
+                    # Rango de alerta: Q15 a Q250
+                    if precio and 15.0 <= precio <= 250.0:
+                        bgg = consultar_bgg(nombre)
+                        if bgg:
+                            print(f"🚨 Enviando alerta: {bgg['nombre']} a Q{precio}")
+                            enviar_alerta(
+                                titulo=bgg["nombre"],
+                                precio=precio,
+                                rating_bgg=bgg["rating"],
+                                rank_bgg=bgg["rank"],
+                                peso_bgg=bgg["weight"],
+                                url_post=post_url,
+                                thumbnail=bgg["thumbnail"]
+                            )
+                            nuevos_encontrados += 1
+                    else:
+                        print(f"Descartado '{nombre}' (precio: Q{precio})")
+
+        except Exception as e:
+            print(f"Error durante el scraping: {e}")
+        finally:
+            browser.close()
 
     guardar_posts_vistos(vistos)
-    print(f"\nRevisión finalizada. {nuevos_encontrados} alertas enviadas.")
+    print(f"\nFinalizado. {nuevos_encontrados} alertas enviadas.")
 
 if __name__ == "__main__":
-    ejecutar_revision()
-    
+    raspar_marketplace()
+        
