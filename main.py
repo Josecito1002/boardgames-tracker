@@ -182,7 +182,13 @@ COLUMNAS_HISTORIAL = [
 # complejidad no necesitan ningún modelo de lenguaje. Cada juego se consulta
 # una sola vez en su vida: el resultado se guarda en este caché, que también
 # se commitea.
-CONSULTAR_BGG = True
+# Apagado: BoardGameGeek rechaza las peticiones desde los runners de GitHub
+# Actions. Se probó con User-Agent propio (401), con uno de navegador (403) y
+# contra api.geekdo.com (403 también), así que el bloqueo es por origen y no
+# hay cabecera que lo evite. El código se queda por si algún día se ejecuta
+# desde otra red; mientras tanto, rating y complejidad los rellena la tarea
+# externa, que sí puede navegar.
+CONSULTAR_BGG = False
 ARCHIVO_CACHE_BGG = "bgg_cache.json"
 MAX_CONSULTAS_BGG_POR_CORRIDA = 40
 PAUSA_ENTRE_CONSULTAS_BGG = 1.5  # segundos; BGG limita las peticiones seguidas
@@ -629,7 +635,27 @@ def _clave_juego(juego):
     return (_clave_comparable(juego[0]), precio)
 
 
-def extraer_juegos_de_google_sheet(texto):
+def detectar_hoja_enlazada(page):
+    """Busca en los enlaces de la página el Google Sheet de la publicación.
+
+    No sirve buscarlo en el texto: Facebook recorta la URL visible con
+    puntos suspensivos y envuelve los enlaces salientes en /l.php?u=<url
+    codificada>, así que la dirección real solo está en el href.
+    """
+    try:
+        for a in page.query_selector_all('a[href]'):
+            href = a.get_attribute("href") or ""
+            if "l.php" in href and "u=" in href:
+                partes = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
+                href = (partes.get("u") or [""])[0]
+            if "docs.google.com/spreadsheets" in href:
+                return href
+    except Exception as e:
+        print(f"   Aviso: no se pudieron revisar los enlaces: {e}", flush=True)
+    return ""
+
+
+def extraer_juegos_de_google_sheet(texto, url_hoja=""):
     """Lee el catálogo desde el Google Sheet que enlaza la publicación.
 
     Varios vendedores publican "les dejo un drive por si es mas facil" con el
@@ -638,9 +664,10 @@ def extraer_juegos_de_google_sheet(texto):
     "ravel Blokus". Si la hoja es pública se exporta como CSV, que no
     necesita credenciales.
     """
-    if not texto:
-        return []
-    enlace = re.search(r"docs\.google\.com/spreadsheets/d/([A-Za-z0-9_-]{20,})", texto)
+    enlace = re.search(
+        r"docs\.google\.com/spreadsheets/d/([A-Za-z0-9_-]{20,})",
+        f"{url_hoja}\n{texto or ''}",
+    )
     if not enlace:
         return []
 
@@ -965,7 +992,9 @@ def enviar_telegram(mensaje):
         return False
 
 
-def enviar_publicacion_correo(iid, url_post, texto_post, rutas_imgs=None, texto_ocr=""):
+def enviar_publicacion_correo(
+    iid, url_post, texto_post, rutas_imgs=None, texto_ocr="", url_hoja=""
+):
     rutas_imgs = rutas_imgs or []
     if not GMAIL_USER or not GMAIL_APP_PASS:
         print("Aviso: GMAIL no configurado.", flush=True)
@@ -992,7 +1021,7 @@ def enviar_publicacion_correo(iid, url_post, texto_post, rutas_imgs=None, texto_
         # buena y el OCR de sus capturas solo añadiría el mismo catálogo mal
         # transcrito ("Rush 8 Bash" junto a "Rush & Bash"), que el dedupe no
         # puede unir porque los nombres difieren.
-        desde_hoja = extraer_juegos_de_google_sheet(texto_post)
+        desde_hoja = extraer_juegos_de_google_sheet(texto_post, url_hoja)
         fuentes = [desde_hoja, extraer_juegos_con_precio(texto_post)]
         if not desde_hoja:
             fuentes.append(extraer_juegos_de_tabla_ocr(texto_ocr))
@@ -1629,7 +1658,8 @@ def raspar_grupo(page, url_grupo, vistos, max_posts=MAX_POSTS_GRUPO):
                 texto_ocr = extraer_texto_de_imagenes(fotos) if fotos else ""
 
                 correo_ok = enviar_publicacion_correo(
-                    iid, post_url, texto_limpio, fotos, texto_ocr
+                    iid, post_url, texto_limpio, fotos, texto_ocr,
+                    url_hoja=detectar_hoja_enlazada(page),
                 )
                 debe_notificar, motivo = evaluar_alerta_telegram(
                     f"{texto_limpio}\n{texto_ocr}"
@@ -1767,7 +1797,8 @@ def raspar():
                 texto_ocr = extraer_texto_de_imagenes(fotos) if fotos else ""
 
                 correo_ok = enviar_publicacion_correo(
-                    iid, real_url, texto_limpio, fotos, texto_ocr
+                    iid, real_url, texto_limpio, fotos, texto_ocr,
+                    url_hoja=detectar_hoja_enlazada(page),
                 )
                 debe_notificar, motivo = evaluar_alerta_telegram(
                     f"{texto_limpio}\n{texto_ocr}"
@@ -1857,7 +1888,8 @@ def raspar():
                         texto_ocr = extraer_texto_de_imagenes(fotos) if fotos else ""
 
                         correo_ok = enviar_publicacion_correo(
-                            iid, post_url, texto_limpio, fotos, texto_ocr
+                            iid, post_url, texto_limpio, fotos, texto_ocr,
+                            url_hoja=detectar_hoja_enlazada(page),
                         )
                         debe_notificar, motivo = evaluar_alerta_telegram(
                             f"{texto_limpio}\n{texto_ocr}"
