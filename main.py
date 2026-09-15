@@ -389,6 +389,41 @@ def descargar_fotos_reales(page, iid):
             except Exception:
                 break
 
+    # Estrategia 3 (respaldo): barrido directo de las imágenes que la página
+    # ya muestra, sin abrir el visor. Las páginas de /commerce/listing/ no
+    # usan el visor de fotos del feed, así que las estrategias de clic no
+    # encuentran nada y hacía falta leerlas tal cual están.
+    if not rutas:
+        def _mejor_src(img):
+            # A veces el src es un placeholder y la foto real solo viaja en
+            # srcset; se toma la última entrada, que es la de mayor tamaño.
+            src = img.get_attribute("src") or ""
+            if src.startswith("http") and "scontent" in src:
+                return src
+            srcset = img.get_attribute("srcset") or ""
+            for trozo in reversed([t.strip() for t in srcset.split(",") if t.strip()]):
+                candidato = trozo.split(" ")[0]
+                if candidato.startswith("http") and "scontent" in candidato:
+                    return candidato
+            return src
+
+        imgs_pagina = page.query_selector_all("img")
+        grandes = 0
+        for im in imgs_pagina:
+            try:
+                box = im.bounding_box()
+                if not box or box["width"] < 200 or box["height"] < 200:
+                    continue
+                grandes += 1
+                _guardar_si_es_nueva(_mejor_src(im))
+            except Exception:
+                continue
+        print(
+            f"   🔎 Respaldo de fotos — imágenes en la página:"
+            f" {len(imgs_pagina)}, suficientemente grandes: {grandes}",
+            flush=True,
+        )
+
     print(f"   ✅ Total fotos descargadas para ID {iid}: {len(rutas)}", flush=True)
     return rutas
 
@@ -440,7 +475,8 @@ def extraer_listings_de_comercio(page):
     """
     vistos_ids = []
     resultados = []
-    for a in page.query_selector_all('a[href*="/commerce/listing/"]'):
+    enlaces = page.query_selector_all('a[href*="/commerce/listing/"]')
+    for a in enlaces:
         href = a.get_attribute("href") or ""
         m = re.search(r"/commerce/listing/(\d{8,})", href)
         if m and m.group(1) not in vistos_ids:
@@ -448,10 +484,18 @@ def extraer_listings_de_comercio(page):
             resultados.append(
                 (m.group(1), f"https://www.facebook.com/commerce/listing/{m.group(1)}/")
             )
+    # Cada tarjeta suele traer varios enlaces al mismo anuncio (imagen, título,
+    # precio...), así que la diferencia entre ambos números dice si faltan
+    # tarjetas por cargar o si solo eran enlaces repetidos.
+    print(
+        f"   🔎 Enlaces a anuncios: {len(enlaces)} —"
+        f" anuncios distintos: {len(resultados)}",
+        flush=True,
+    )
     return resultados
 
 
-def esperar_feed_del_grupo(page, intentos=10):
+def esperar_feed_del_grupo(page, intentos=25, estables_necesarios=3):
     """Espera a que el feed del grupo deje de crecer antes de leerlo.
 
     Sin esto se lee la página cuando todavía está el esqueleto de carga (los
@@ -471,14 +515,22 @@ def esperar_feed_del_grupo(page, intentos=10):
             page.query_selector_all('a[href*="/commerce/listing/"]')
         )
 
+    # Una sola pasada sin crecimiento no significa que ya no haya más: la
+    # carga diferida de Facebook a veces tarda más que la espera, así que se
+    # exigen varias pasadas estables seguidas antes de darse por satisfecho.
     previos = -1
+    estables = 0
     for _ in range(intentos):
         actuales = _contar()
-        if actuales >= 6 and actuales == previos:
-            break
+        if actuales == previos:
+            estables += 1
+            if estables >= estables_necesarios and actuales >= 6:
+                break
+        else:
+            estables = 0
         previos = actuales
-        page.evaluate("window.scrollBy(0, 1400)")
-        page.wait_for_timeout(2000)
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(1800)
     return _contar()
 
 
