@@ -1,6 +1,7 @@
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+import csv
 import json
 import os
 import re
@@ -10,6 +11,7 @@ import time
 import unicodedata
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from PIL import Image
 from playwright.sync_api import sync_playwright
 import pytesseract
@@ -162,6 +164,24 @@ LINEAS_BASURA_INTERFAZ = {
     "mas informacion",
     "vender algo",
 }
+
+# Historial en CSV dentro del propio repositorio. El workflow lo commitea al
+# terminar, así que se puede leer desde Google Sheets con IMPORTDATA sobre la
+# URL "raw" y la hoja se refresca sola, sin credenciales de Google.
+ARCHIVO_HISTORIAL = "historial.csv"
+COLUMNAS_HISTORIAL = [
+    "Fecha", "ID Publicacion", "Juego", "Precio GTQ", "Estado",
+    "En Wishlist", "BGG Nombre", "BGG Rating", "BGG Complejidad", "Enlace",
+]
+
+# BoardGameGeek tiene API pública y gratuita, así que el rating y la
+# complejidad no necesitan ningún modelo de lenguaje. Cada juego se consulta
+# una sola vez en su vida: el resultado se guarda en este caché, que también
+# se commitea.
+CONSULTAR_BGG = True
+ARCHIVO_CACHE_BGG = "bgg_cache.json"
+MAX_CONSULTAS_BGG_POR_CORRIDA = 40
+PAUSA_ENTRE_CONSULTAS_BGG = 1.5  # segundos; BGG limita las peticiones seguidas
 
 # Correo que se envía al terminar una corrida en la que SÍ se notificó al
 # menos una publicación. Sirve de detonador para el análisis posterior: en
@@ -606,6 +626,146 @@ def extraer_texto_de_imagenes(rutas_imgs):
     return "\n\n".join(texto_acumulado)
 
 
+def _leer_cache_bgg():
+    if os.path.exists(ARCHIVO_CACHE_BGG):
+        try:
+            with open(ARCHIVO_CACHE_BGG, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _guardar_cache_bgg(cache):
+    try:
+        with open(ARCHIVO_CACHE_BGG, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2, ensure_ascii=False, sort_keys=True)
+    except Exception as e:
+        print(f"   Aviso: no se pudo guardar el caché de BGG: {e}", flush=True)
+
+
+def _pedir_xml(url, timeout=20):
+    peticion = urllib.request.Request(
+        url, headers={"User-Agent": "boardgames-tracker/1.0"}
+    )
+    with urllib.request.urlopen(peticion, timeout=timeout) as respuesta:
+        return ET.fromstring(respuesta.read())
+
+
+def consultar_bgg(nombre):
+    """Rating y complejidad de un juego en BoardGameGeek.
+
+    Devuelve un dict con bgg_nombre, rating y complejidad; vacío si no se
+    encuentra o si la consulta falla. Nunca lanza: un fallo de red no debe
+    tumbar la corrida, y la columna vacía es una respuesta aceptable.
+    """
+    try:
+        consulta = urllib.parse.quote(nombre)
+        raiz = _pedir_xml(
+            f"https://boardgamegeek.com/xmlapi2/search"
+            f"?query={consulta}&type=boardgame"
+        )
+        item = raiz.find("item")
+        if item is None:
+            return {}
+        bgg_id = item.get("id")
+        nombre_bgg = item.find("name")
+        nombre_bgg = nombre_bgg.get("value") if nombre_bgg is not None else ""
+
+        time.sleep(PAUSA_ENTRE_CONSULTAS_BGG)
+        detalle = _pedir_xml(
+            f"https://boardgamegeek.com/xmlapi2/thing?id={bgg_id}&stats=1"
+        )
+        promedio = detalle.find(".//statistics/ratings/average")
+        peso = detalle.find(".//statistics/ratings/averageweight")
+        return {
+            "bgg_nombre": nombre_bgg,
+            "rating": round(float(promedio.get("value")), 2) if promedio is not None else "",
+            "complejidad": round(float(peso.get("value")), 2) if peso is not None else "",
+        }
+    except Exception as e:
+        print(f"   Aviso: BGG falló para {nombre!r}: {e}", flush=True)
+        return {}
+
+
+def enriquecer_con_bgg(juegos):
+    """Añade los datos de BGG a cada juego, consultando solo los nuevos."""
+    if not (CONSULTAR_BGG and juegos):
+        return {}
+
+    cache = _leer_cache_bgg()
+    consultas = 0
+    for nombre, _precio, _estado in juegos:
+        clave = _clave_comparable(nombre)
+        if clave in cache:
+            continue
+        if consultas >= MAX_CONSULTAS_BGG_POR_CORRIDA:
+            print(
+                "   Aviso: alcanzado el tope de consultas a BGG en esta"
+                " corrida; el resto queda sin datos hasta la próxima.",
+                flush=True,
+            )
+            break
+        cache[clave] = consultar_bgg(nombre)
+        consultas += 1
+        time.sleep(PAUSA_ENTRE_CONSULTAS_BGG)
+
+    if consultas:
+        _guardar_cache_bgg(cache)
+        print(f"   📚 BGG: {consultas} juegos consultados, el resto del caché.", flush=True)
+    return cache
+
+
+def registrar_en_historial(iid, url_post, juegos):
+    """Escribe una fila por juego en el CSV que alimenta la hoja de cálculo.
+
+    Es idempotente: si el ID ya tiene filas, no vuelve a escribir. Así una
+    corrida repetida no duplica el catálogo.
+    """
+    if not juegos:
+        return 0
+
+    existentes = set()
+    if os.path.exists(ARCHIVO_HISTORIAL):
+        try:
+            with open(ARCHIVO_HISTORIAL, "r", encoding="utf-8", newline="") as f:
+                existentes = {fila.get("ID Publicacion", "") for fila in csv.DictReader(f)}
+        except Exception:
+            pass
+    if str(iid) in existentes:
+        print(f"   El historial ya tiene el ID {iid}; no se reescribe.", flush=True)
+        return 0
+
+    cache = enriquecer_con_bgg(juegos)
+    fecha = time.strftime("%Y-%m-%d")
+    es_nuevo = not os.path.exists(ARCHIVO_HISTORIAL)
+    try:
+        with open(ARCHIVO_HISTORIAL, "a", encoding="utf-8", newline="") as f:
+            escritor = csv.DictWriter(f, fieldnames=COLUMNAS_HISTORIAL)
+            if es_nuevo:
+                escritor.writeheader()
+            for nombre, precio, estado in juegos:
+                datos = cache.get(_clave_comparable(nombre), {})
+                en_wishlist = any(j in nombre.lower() for j in WISHLIST)
+                escritor.writerow({
+                    "Fecha": fecha,
+                    "ID Publicacion": iid,
+                    "Juego": nombre,
+                    "Precio GTQ": precio,
+                    "Estado": estado,
+                    "En Wishlist": "sí" if en_wishlist else "",
+                    "BGG Nombre": datos.get("bgg_nombre", ""),
+                    "BGG Rating": datos.get("rating", ""),
+                    "BGG Complejidad": datos.get("complejidad", ""),
+                    "Enlace": url_post,
+                })
+        print(f"   🗒️ Historial: {len(juegos)} filas añadidas para {iid}.", flush=True)
+        return len(juegos)
+    except Exception as e:
+        print(f"   Error al escribir el historial: {e}", flush=True)
+        return 0
+
+
 def enviar_telegram(mensaje):
     """Envía un aviso rápido por Telegram."""
     if not TG_TOKEN or not CHAT_ID:
@@ -656,6 +816,7 @@ def enviar_publicacion_correo(iid, url_post, texto_post, rutas_imgs=None, texto_
             extraer_juegos_de_tabla_ocr(texto_ocr),
         )
         bloque_juegos = formatear_juegos_para_correo(juegos)
+        registrar_en_historial(iid, url_post, juegos)
 
         html_content = f"""
         <html>
