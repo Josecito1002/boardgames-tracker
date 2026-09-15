@@ -278,6 +278,10 @@ def limpiar_texto_marketplace(texto_crudo):
 
         if clave in LINEAS_BASURA_INTERFAZ:
             continue
+        # Un número solo en su línea es un contador de reacciones o
+        # comentarios. Los precios siempre llevan la Q, así que no se pierden.
+        if re.fullmatch(r"\d{1,4}", actual):
+            continue
         # Líneas que solo traen puntuación suelta: '.', '·', separadores.
         if actual and not re.search(r"[0-9a-záéíóúüñ]", clave):
             continue
@@ -526,20 +530,56 @@ def descargar_fotos_reales(page, iid):
                     return candidato
             return src
 
-        imgs_pagina = page.query_selector_all("img")
-        grandes = 0
-        for im in imgs_pagina:
-            try:
-                box = im.bounding_box()
-                if not box or box["width"] < 200 or box["height"] < 200:
+        def _barrer_imagenes():
+            """Guarda las imágenes grandes visibles. Devuelve cuántas nuevas."""
+            nuevas = 0
+            for im in page.query_selector_all("img"):
+                try:
+                    box = im.bounding_box()
+                    if not box or box["width"] < 200 or box["height"] < 200:
+                        continue
+                    if _guardar_si_es_nueva(_mejor_src(im)):
+                        nuevas += 1
+                except Exception:
                     continue
-                grandes += 1
-                _guardar_si_es_nueva(_mejor_src(im))
-            except Exception:
-                continue
+            return nuevas
+
+        def _avanzar_carrusel():
+            """Pasa a la siguiente foto del anuncio; False si no se pudo."""
+            for selector in (
+                'div[role="main"] [aria-label*="iguiente"]',
+                'div[role="main"] [aria-label*="ext photo"]',
+                'div[role="main"] [aria-label*="Next"]',
+            ):
+                for boton in page.query_selector_all(selector):
+                    try:
+                        if boton.is_visible():
+                            boton.click(timeout=1500)
+                            page.wait_for_timeout(900)
+                            return True
+                    except Exception:
+                        continue
+            return False
+
+        total_imgs = len(page.query_selector_all("img"))
+        _barrer_imagenes()
+
+        # El carrusel de /commerce/listing/ solo monta la foto visible, así que
+        # las demás aparecen únicamente al ir pasando. Se recorre hasta que dos
+        # avances seguidos no aporten nada nuevo.
+        url_anuncio = page.url
+        sin_novedad = 0
+        for _ in range(12):
+            if sin_novedad >= 2 or not _avanzar_carrusel():
+                break
+            if page.url != url_anuncio:
+                # Un clic sacó de la publicación; lo que se vea ya no es suyo.
+                break
+            sin_novedad = 0 if _barrer_imagenes() else sin_novedad + 1
+
         print(
             f"   🔎 Respaldo de fotos — imágenes en la página:"
-            f" {len(imgs_pagina)}, suficientemente grandes: {grandes}",
+            f" {total_imgs}, rescatadas: {len(rutas)}",
             flush=True,
         )
 
