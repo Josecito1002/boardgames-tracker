@@ -85,6 +85,34 @@ PALABRAS_CLAVE_JUEGO = [
     "guia del dungeon master",
 ]
 
+# Descartar las publicaciones de gente que BUSCA un juego ("Busco Bang!
+# Reloaded, nuevo o usado") en vez de venderlo. Ponlo en False si también
+# quieres enterarte de esas.
+DESCARTAR_PUBLICACIONES_DE_BUSQUEDA = True
+
+# Frases de quien busca y de quien vende. Cuando un anuncio tiene de ambas,
+# gana la que aparezca primero en el texto.
+PATRONES_BUSQUEDA = [
+    r"\bbusco\b",
+    r"\bbuscando\b",
+    r"\bcompro\b",
+    r"\bse busca\b",
+    r"\bquiero comprar\b",
+    r"\balguien (?:tiene|vende|vender[ií]a)\b",
+    r"\bqui[eé]n vende\b",
+    r"\bd[oó]nde (?:consigo|venden|puedo conseguir)\b",
+    r"\bwtb\b",
+]
+PATRONES_VENTA = [
+    r"\bvendo\b",
+    r"\bse vende\b",
+    r"\ben venta\b",
+    r"\bremato\b",
+    # Un precio real. Se exige que no empiece en cero porque los anuncios de
+    # búsqueda salen justamente con "Q0".
+    r"\bq\s?[1-9]\d*",
+]
+
 # Cuántas publicaciones nuevas procesar como máximo por corrida.
 # Cada una implica abrirla, descargar fotos, pasarles OCR y enviar el correo,
 # así que subirlas alarga la corrida y la cantidad de correos de golpe.
@@ -125,6 +153,7 @@ def lista_para_log(items):
         return "(vacío)"
     return " | ".join(sanear_para_log(i) for i in items)
 
+
 def evaluar_alerta_telegram(texto):
     """Decide si vale la pena notificar por Telegram.
 
@@ -139,12 +168,41 @@ def evaluar_alerta_telegram(texto):
     return False, ""
 
 
+def es_publicacion_de_busqueda(texto):
+    """True si el anuncio es de alguien que BUSCA un juego, no que lo vende.
+
+    El grupo mezcla ventas con publicaciones tipo "Busco Bang! Reloaded,
+    nuevo o usado", que salen con precio Q0 y no sirven para el rastreo.
+    """
+    t = texto.lower()
+    # "no busco cambios" en una venta no la convierte en una búsqueda.
+    t = re.sub(r"\bno\s+(?:busco|compro|estoy buscando)\b", " ", t)
+
+    def _primera_posicion(patrones):
+        posiciones = [m.start() for p in patrones if (m := re.search(p, t))]
+        return min(posiciones) if posiciones else None
+
+    pos_busqueda = _primera_posicion(PATRONES_BUSQUEDA)
+    if pos_busqueda is None:
+        return False
+
+    pos_venta = _primera_posicion(PATRONES_VENTA)
+    if pos_venta is None:
+        return True
+
+    # Con señales de ambos tipos, manda la que abre el anuncio.
+    return pos_busqueda < pos_venta
+
+
 def es_publicacion_valida(texto, termino_busqueda=""):
     """
     Evalúa si la publicación es realmente de nuestro interés basándose
     en descartes generales de muebles/objetos ajenos.
     """
     t = texto.lower()
+
+    if DESCARTAR_PUBLICACIONES_DE_BUSQUEDA and es_publicacion_de_busqueda(texto):
+        return False
 
     # Descarte inmediato por muebles o cosas ajenas, salvo que mencione
     # explícitamente algo de juegos de mesa.
@@ -780,6 +838,12 @@ def raspar_grupo(page, url_grupo, vistos, max_posts=MAX_POSTS_GRUPO):
 
                 # AQUÍ SE APLICA EL NUEVO FILTRO PARA GRUPOS
                 if not es_publicacion_valida(texto_limpio):
+                    motivo_descarte = (
+                        "es alguien buscando un juego, no vendiéndolo"
+                        if es_publicacion_de_busqueda(texto_limpio)
+                        else "no pasó el filtro de contenido"
+                    )
+                    print(f"      ↩️ Descartada: {motivo_descarte}.", flush=True)
                     vistos.add(iid)
                     continue
 
@@ -963,6 +1027,12 @@ def raspar():
 
                         # VALIDACIÓN FINAL DEL CONTENIDO COMPLETO
                         if not es_publicacion_valida(texto_crudo, termino_busqueda=termino):
+                            motivo_descarte = (
+                                "es alguien buscando un juego, no vendiéndolo"
+                                if es_publicacion_de_busqueda(texto_crudo)
+                                else "no pasó el filtro de contenido"
+                            )
+                            print(f"      ↩️ Descartada: {motivo_descarte}.", flush=True)
                             vistos.add(iid)
                             continue
 
