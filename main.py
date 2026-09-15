@@ -406,6 +406,15 @@ MARCADORES_DE_ESTADO = re.compile(
     re.IGNORECASE,
 )
 
+# Palabras de logística y de pago. No aparecen en el título de ningún juego,
+# y sí en las frases que el parser confundía con juegos: "Modalidad pago
+# contra entrega: El valor del juguete", "Centro comercial Portales".
+PALABRAS_LOGISTICA = (
+    "pago", "entrega", "envio", "modalidad", "comercial", "whatsapp",
+    "domicilio", "transferencia", "deposito", "efectivo", "negociable",
+    "interesad", "contactar", "mensaje", "ubicacion", "direccion",
+)
+
 # Una línea que termina en preposición o artículo está cortada a la mitad
 # ("Entrego por", "Sábados por"): no es el nombre de nada.
 FINALES_TRUNCADOS = (
@@ -435,6 +444,11 @@ def _nombre_de_juego(bruto):
 
     # "Juegos de mesa Jenga tradicional" -> "Jenga tradicional".
     # Si tras quitar la categoría no queda nada, era solo la categoría.
+    # Los títulos suelen llevar un reclamo tras una barra vertical:
+    # "JUMANJI | JUEGO DE MESA CLÁSICO". Además la barra es el separador del
+    # bloque del correo, así que no puede sobrevivir dentro de un nombre.
+    nombre = nombre.split("|")[0].strip()
+
     sin_categoria = re.sub(r"^(?:vendo|oferta|nuevos?|nueva)\s+", "", nombre, flags=re.I)
     sin_categoria = re.sub(
         r"^juegos?\s+de\s+mesas?\b[\s:,\-–—]*", "", sin_categoria, flags=re.I
@@ -454,6 +468,8 @@ def _nombre_de_juego(bruto):
     if not re.search(r"[a-z]", clave):
         return None
     if clave in FRASES_NO_JUEGO_EXACTAS or clave.startswith(PREFIJOS_NO_JUEGO):
+        return None
+    if any(palabra in clave for palabra in PALABRAS_LOGISTICA):
         return None
     if clave.split()[-1] in FINALES_TRUNCADOS:
         return None
@@ -477,6 +493,28 @@ def separar_estado(nombre):
     if len(limpio) < 3:
         return nombre, ""
     return limpio, nota
+
+
+# A partir de cuántas líneas con precio se considera que el texto es un
+# catálogo. Por debajo es un anuncio de un solo artículo, y trocear su
+# descripción produce filas como "Centro comercial Portales" con el número
+# de un local como precio.
+MINIMO_LINEAS_PARA_CATALOGO = 4
+
+
+def _juego_de_anuncio_individual(texto):
+    """En un anuncio de un artículo, el juego es el título, no la descripción."""
+    lineas = [l.strip() for l in texto.splitlines() if l.strip()]
+    if not lineas:
+        return []
+    nombre = _nombre_de_juego(lineas[0])
+    if not nombre:
+        return []
+    precio = re.search(r"Q\s?([\d.,]+)", texto)
+    if not precio:
+        return []
+    limpio, estado = separar_estado(nombre)
+    return [(limpio, precio.group(1).rstrip(".,").replace(",", ""), estado)]
 
 
 def extraer_juegos_con_precio(texto):
@@ -526,6 +564,8 @@ def extraer_juegos_con_precio(texto):
             if (limpio, precio) not in [(j[0], j[1]) for j in juegos]:
                 juegos.append((limpio, precio, estado))
 
+    if len(juegos) < MINIMO_LINEAS_PARA_CATALOGO:
+        return _juego_de_anuncio_individual(texto)
     return juegos
 
 
@@ -743,21 +783,37 @@ def _guardar_cache_bgg(cache):
         print(f"   Aviso: no se pudo guardar el caché de BGG: {e}", flush=True)
 
 
-def _pedir_xml(url, timeout=20):
-    # BoardGameGeek responde 401 a los agentes que no parecen un navegador,
-    # que es lo que devolvía con un User-Agent propio del script.
-    peticion = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"
-            ),
-            "Accept": "application/xml, text/xml, */*",
-        },
-    )
-    with urllib.request.urlopen(peticion, timeout=timeout) as respuesta:
-        return ET.fromstring(respuesta.read())
+# BoardGameGeek sirve la misma API por dos dominios. El primero suele estar
+# detrás de protección anti-bots y devolvía 401 con un User-Agent propio y
+# 403 con uno de navegador; api.geekdo.com es el que usan los clientes
+# programáticos. Se prueban los dos antes de rendirse.
+HOSTS_BGG = (
+    "https://api.geekdo.com/xmlapi2",
+    "https://boardgamegeek.com/xmlapi2",
+)
+
+
+def _pedir_xml(ruta, timeout=20):
+    ultimo_error = None
+    for host in HOSTS_BGG:
+        try:
+            peticion = urllib.request.Request(
+                f"{host}{ruta}",
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/122.0 Safari/537.36"
+                    ),
+                    "Accept": "application/xml, text/xml, */*",
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+            )
+            with urllib.request.urlopen(peticion, timeout=timeout) as respuesta:
+                return ET.fromstring(respuesta.read())
+        except Exception as e:
+            ultimo_error = e
+    raise ultimo_error
 
 
 def consultar_bgg(nombre):
@@ -769,10 +825,7 @@ def consultar_bgg(nombre):
     """
     try:
         consulta = urllib.parse.quote(nombre)
-        raiz = _pedir_xml(
-            f"https://boardgamegeek.com/xmlapi2/search"
-            f"?query={consulta}&type=boardgame"
-        )
+        raiz = _pedir_xml(f"/search?query={consulta}&type=boardgame")
         item = raiz.find("item")
         if item is None:
             # Búsqueda válida sin resultados: eso sí se puede cachear.
@@ -782,9 +835,7 @@ def consultar_bgg(nombre):
         nombre_bgg = nombre_bgg.get("value") if nombre_bgg is not None else ""
 
         time.sleep(PAUSA_ENTRE_CONSULTAS_BGG)
-        detalle = _pedir_xml(
-            f"https://boardgamegeek.com/xmlapi2/thing?id={bgg_id}&stats=1"
-        )
+        detalle = _pedir_xml(f"/thing?id={bgg_id}&stats=1")
         promedio = detalle.find(".//statistics/ratings/average")
         peso = detalle.find(".//statistics/ratings/averageweight")
         return {
@@ -835,7 +886,9 @@ def _precio_plausible(precio):
         valor = float(str(precio).replace(",", "."))
     except (TypeError, ValueError):
         return False
-    return 1 <= valor <= 100000
+    # Por debajo de Q10 no hay juegos de mesa: es un número suelto de la
+    # descripción que se coló como precio.
+    return 10 <= valor <= 100000
 
 
 def registrar_en_historial(iid, url_post, juegos):
