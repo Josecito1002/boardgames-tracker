@@ -161,6 +161,17 @@ LINEAS_BASURA_INTERFAZ = {
     "vender algo",
 }
 
+# Correo que se envía al terminar una corrida en la que SÍ se notificó al
+# menos una publicación. Sirve de detonador para el análisis posterior: en
+# vez de revisar el buzón a ciegas cada tanto, se dispara justo cuando hay
+# algo nuevo que analizar. Si no se envió ninguna publicación no se manda,
+# para no despertar al analizador en vano.
+ENVIAR_CORREO_DE_CORRIDA = True
+ASUNTO_CORRIDA_COMPLETADA = "[Marketplace Scraper] Corrida completada"
+
+# Se llena durante la corrida con los IDs efectivamente notificados.
+PUBLICACIONES_NOTIFICADAS = []
+
 # Cuántas publicaciones nuevas procesar como máximo por corrida.
 # Cada una implica abrirla, descargar fotos, pasarles OCR y enviar el correo,
 # así que subirlas alarga la corrida y la cantidad de correos de golpe.
@@ -608,9 +619,47 @@ def enviar_publicacion_correo(iid, url_post, texto_post, rutas_imgs=None, texto_
             server.sendmail(GMAIL_USER, GMAIL_USER, msg.as_string())
 
         print(f"📧 Correo enviado para ID {iid} con {len(rutas_imgs)} fotos.", flush=True)
+        PUBLICACIONES_NOTIFICADAS.append(str(iid))
         return True
     except Exception as e:
         print(f"Error al enviar correo: {e}", flush=True)
+        return False
+
+
+def enviar_correo_de_corrida(ids_notificados):
+    """Avisa por correo que la corrida terminó y cuántas publicaciones salieron.
+
+    El asunto es fijo y distinto al de las publicaciones, para que se pueda
+    usar como disparador sin que coincida con la búsqueda de éstas.
+    """
+    if not (ENVIAR_CORREO_DE_CORRIDA and ids_notificados):
+        return False
+    if not GMAIL_USER or not GMAIL_APP_PASS:
+        return False
+
+    try:
+        cuerpo = (
+            f"Publicaciones notificadas en esta corrida: {len(ids_notificados)}\n"
+            f"Terminada: {time.strftime('%Y-%m-%d %H:%M:%S')} UTC\n\n"
+            "IDs:\n" + "\n".join(f"- {i}" for i in ids_notificados)
+        )
+        msg = MIMEText(cuerpo, "plain", "utf-8")
+        msg["Subject"] = ASUNTO_CORRIDA_COMPLETADA
+        msg["From"] = f"Marketplace Scraper <{GMAIL_USER}>"
+        msg["To"] = GMAIL_USER
+
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
+            server.login(GMAIL_USER, GMAIL_APP_PASS)
+            server.sendmail(GMAIL_USER, GMAIL_USER, msg.as_string())
+
+        print(
+            f"🔔 Aviso de corrida enviado ({len(ids_notificados)} publicaciones).",
+            flush=True,
+        )
+        return True
+    except Exception as e:
+        print(f"Error al enviar el aviso de corrida: {e}", flush=True)
         return False
 
 
@@ -1416,6 +1465,10 @@ def raspar():
 
     with open("vistos.json", "w", encoding="utf-8") as f:
         json.dump(list(vistos), f, indent=2)
+
+    # Al final, y solo si hubo algo que notificar: así el análisis posterior
+    # se dispara con el historial ya guardado.
+    enviar_correo_de_corrida(PUBLICACIONES_NOTIFICADAS)
 
 if __name__ == "__main__":
     raspar()
