@@ -30,6 +30,8 @@ URLS_PRIORITARIAS = [
     # enviarse el correo queda en vistos.json y las corridas siguientes la
     # saltan. Se puede borrar de aquí después.
     "https://www.facebook.com/share/p/1EtvvX7izt/",
+    # Catálogo cuyo listado va dentro de capturas de una hoja de cálculo.
+    "https://www.facebook.com/share/p/19yrhVsL8N/",
 ]
 
 # 2. Grupos de Facebook a rastrear (pestaña de Compraventa, no el feed general)
@@ -495,6 +497,78 @@ def extraer_juegos_con_precio(texto):
     return juegos
 
 
+def extraer_juegos_de_tabla_ocr(texto_ocr):
+    """Lee las listas de juegos que vienen como tabla dentro de una imagen.
+
+    Hay publicaciones cuyo texto es solo "les dejo la lista" y el catálogo
+    entero está en capturas de una hoja de cálculo, con columnas
+    Juego / Precio / Estado / Idioma y SIN el símbolo Q delante del precio.
+    El parser del texto libre no las ve, así que se leen aparte del OCR.
+
+    El precio se reconoce como un token que es únicamente un número de 2 a 5
+    dígitos: así "(8/10)", "Copy 2)" o "(2000s" no se confunden con él, que
+    es lo que rompía los intentos más simples.
+    """
+    if not texto_ocr:
+        return []
+
+    token_precio = re.compile(r"^\d{2,5}(?:[.,]\d{1,2})?$")
+    juegos = []
+    for linea in texto_ocr.splitlines():
+        actual = linea.strip()
+        if not actual or actual.startswith("---"):
+            continue
+
+        partes = actual.split()
+        posicion = next(
+            (i for i, t in enumerate(partes) if token_precio.match(t)), None
+        )
+        if posicion is None or posicion == 0:
+            continue
+
+        precio = partes[posicion].replace(",", ".")
+        try:
+            if not 20 <= float(precio) <= 20000:
+                continue
+        except ValueError:
+            continue
+
+        nombre = _nombre_de_juego(" ".join(partes[:posicion]))
+        if not nombre:
+            continue
+        estado = " ".join(partes[posicion + 1:]).strip(" -–—:,;·")
+        if (nombre, precio) not in [(j[0], j[1]) for j in juegos]:
+            juegos.append((nombre, precio, estado))
+
+    return juegos
+
+
+def _clave_juego(juego):
+    """Nombre y precio comparables: "350" y "350.00" son el mismo precio."""
+    try:
+        precio = f"{float(str(juego[1]).replace(',', '.')):.2f}"
+    except ValueError:
+        precio = str(juego[1])
+    return (_clave_comparable(juego[0]), precio)
+
+
+def combinar_juegos(*listas):
+    """Une varias listas de juegos sin repetir el mismo juego con el mismo precio.
+
+    El mismo catálogo suele venir a la vez en la descripción y en la captura,
+    así que sin comparar los precios normalizados se duplicaría cada fila.
+    """
+    combinados = []
+    vistas = set()
+    for lista in listas:
+        for juego in lista:
+            clave = _clave_juego(juego)
+            if clave not in vistas:
+                vistas.add(clave)
+                combinados.append(juego)
+    return combinados
+
+
 def formatear_juegos_para_correo(juegos):
     """Bloque de texto plano, una línea por juego, fácil de leer en bloque."""
     if not juegos:
@@ -577,7 +651,10 @@ def enviar_publicacion_correo(iid, url_post, texto_post, rutas_imgs=None, texto_
 
         # Bloque ya parseado: evita que el análisis posterior tenga que
         # deducir qué línea del texto libre es un juego con precio.
-        juegos = extraer_juegos_con_precio(texto_post)
+        juegos = combinar_juegos(
+            extraer_juegos_con_precio(texto_post),
+            extraer_juegos_de_tabla_ocr(texto_ocr),
+        )
         bloque_juegos = formatear_juegos_para_correo(juegos)
 
         html_content = f"""
