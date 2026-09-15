@@ -103,7 +103,11 @@ PALABRAS_CLAVE_JUEGO = [
 # Ojo: esto solo desbloquea el ID; la publicación además tiene que seguir
 # apareciendo en el grupo o en la búsqueda para que el scraper la encuentre.
 # Si ya no aparece, usa URLS_PRIORITARIAS con su enlace directo.
-FORZAR_REENVIO_IDS = []
+FORZAR_REENVIO_IDS = [
+    # Se registró leyendo el OCR de las capturas y salió corrupto; ahora se
+    # lee la hoja que enlaza la publicación. Quitar tras la próxima corrida.
+    "3778687745613381",
+]
 
 # Descartar las publicaciones de gente que BUSCA un juego ("Busco Bang!
 # Reloaded, nuevo o usado") en vez de venderlo. Ponlo en False si también
@@ -431,13 +435,21 @@ def _nombre_de_juego(bruto):
 
     # "Juegos de mesa Jenga tradicional" -> "Jenga tradicional".
     # Si tras quitar la categoría no queda nada, era solo la categoría.
-    nombre = re.sub(r"^(?:vendo|oferta|nuevos?|nueva)\s+", "", nombre, flags=re.I)
-    nombre = re.sub(
-        r"^juegos?\s+de\s+mesa\b[\s:,\-–—]*", "", nombre, flags=re.I
+    sin_categoria = re.sub(r"^(?:vendo|oferta|nuevos?|nueva)\s+", "", nombre, flags=re.I)
+    sin_categoria = re.sub(
+        r"^juegos?\s+de\s+mesas?\b[\s:,\-–—]*", "", sin_categoria, flags=re.I
     ).strip()
+    se_quito_categoria = sin_categoria != nombre
+    nombre = sin_categoria
 
     clave = _clave_comparable(nombre)
     if len(clave) < 3 or len(nombre) > 80:
+        return None
+    # Tras quitar la categoría puede quedar un complemento en vez de un
+    # nombre: "juegos de mesas con sus bancas" deja "con sus bancas". Solo
+    # se comprueba en ese caso, porque hay títulos que empiezan por artículo,
+    # como "El Señor de los Anillos".
+    if se_quito_categoria and clave.split()[0] in FINALES_TRUNCADOS:
         return None
     if not re.search(r"[a-z]", clave):
         return None
@@ -556,7 +568,12 @@ def extraer_juegos_de_tabla_ocr(texto_ocr):
         nombre = _nombre_de_juego(" ".join(partes[:posicion]))
         if not nombre:
             continue
-        estado = " ".join(partes[posicion + 1:]).strip(" -–—:,;·")
+        estado = " ".join(partes[posicion + 1:]).strip(" -–—:,;·'\"")
+        # Una fila de la tabla siempre trae algo después del precio (estado,
+        # idioma). Si no hay nada, la línea no era una fila: así se cuela el
+        # nombre de quien publica y otros restos de la captura.
+        if not estado:
+            continue
         if (nombre, precio) not in [(j[0], j[1]) for j in juegos]:
             juegos.append((nombre, precio, estado))
 
@@ -570,6 +587,88 @@ def _clave_juego(juego):
     except ValueError:
         precio = str(juego[1])
     return (_clave_comparable(juego[0]), precio)
+
+
+def extraer_juegos_de_google_sheet(texto):
+    """Lee el catálogo desde el Google Sheet que enlaza la publicación.
+
+    Varios vendedores publican "les dejo un drive por si es mas facil" con el
+    enlace a una hoja, y adjuntan capturas de esa misma hoja. Leer la hoja
+    original da datos exactos; hacer OCR de la captura da "Rush 8 Bash" y
+    "ravel Blokus". Si la hoja es pública se exporta como CSV, que no
+    necesita credenciales.
+    """
+    if not texto:
+        return []
+    enlace = re.search(r"docs\.google\.com/spreadsheets/d/([A-Za-z0-9_-]{20,})", texto)
+    if not enlace:
+        return []
+
+    url_csv = (
+        f"https://docs.google.com/spreadsheets/d/{enlace.group(1)}/export?format=csv"
+    )
+    try:
+        peticion = urllib.request.Request(
+            url_csv,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+                )
+            },
+        )
+        with urllib.request.urlopen(peticion, timeout=25) as respuesta:
+            contenido = respuesta.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        print(f"   Aviso: no se pudo leer la hoja enlazada: {e}", flush=True)
+        return []
+
+    filas = list(csv.reader(contenido.splitlines()))
+    if not filas:
+        return []
+
+    # La cabecera no siempre está en la primera fila: se busca la primera que
+    # tenga a la vez una columna de juego y una de precio.
+    def _indices(cabecera):
+        col_juego = col_precio = None
+        otras = []
+        for i, celda in enumerate(cabecera):
+            clave = _clave_comparable(celda)
+            if col_juego is None and clave in ("juego", "juegos", "game", "nombre", "titulo"):
+                col_juego = i
+            elif col_precio is None and clave in ("precio", "precios", "price", "costo", "valor"):
+                col_precio = i
+            elif clave:
+                otras.append(i)
+        return col_juego, col_precio, otras
+
+    inicio = col_juego = col_precio = None
+    otras = []
+    for n, fila in enumerate(filas[:10]):
+        col_juego, col_precio, otras = _indices(fila)
+        if col_juego is not None and col_precio is not None:
+            inicio = n + 1
+            break
+    if inicio is None:
+        print("   Aviso: la hoja enlazada no tiene columnas de juego y precio.", flush=True)
+        return []
+
+    juegos = []
+    for fila in filas[inicio:]:
+        if len(fila) <= max(col_juego, col_precio):
+            continue
+        nombre = _nombre_de_juego(fila[col_juego])
+        precio = fila[col_precio].strip().replace(",", ".").lstrip("Qq$ ")
+        if not nombre or not precio:
+            continue
+        estado = " ".join(
+            fila[i].strip() for i in otras if i < len(fila) and fila[i].strip()
+        )
+        if (nombre, precio) not in [(j[0], j[1]) for j in juegos]:
+            juegos.append((nombre, precio, estado))
+
+    print(f"   📄 Hoja enlazada leída: {len(juegos)} juegos.", flush=True)
+    return juegos
 
 
 def combinar_juegos(*listas):
@@ -645,8 +744,17 @@ def _guardar_cache_bgg(cache):
 
 
 def _pedir_xml(url, timeout=20):
+    # BoardGameGeek responde 401 a los agentes que no parecen un navegador,
+    # que es lo que devolvía con un User-Agent propio del script.
     peticion = urllib.request.Request(
-        url, headers={"User-Agent": "boardgames-tracker/1.0"}
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+            ),
+            "Accept": "application/xml, text/xml, */*",
+        },
     )
     with urllib.request.urlopen(peticion, timeout=timeout) as respuesta:
         return ET.fromstring(respuesta.read())
@@ -667,7 +775,8 @@ def consultar_bgg(nombre):
         )
         item = raiz.find("item")
         if item is None:
-            return {}
+            # Búsqueda válida sin resultados: eso sí se puede cachear.
+            return {"bgg_nombre": "", "rating": "", "complejidad": ""}
         bgg_id = item.get("id")
         nombre_bgg = item.find("name")
         nombre_bgg = nombre_bgg.get("value") if nombre_bgg is not None else ""
@@ -706,14 +815,27 @@ def enriquecer_con_bgg(juegos):
                 flush=True,
             )
             break
-        cache[clave] = consultar_bgg(nombre)
+        datos = consultar_bgg(nombre)
         consultas += 1
+        # Solo se cachea un resultado bueno. Cachear el fallo convertiría un
+        # corte de red o un bloqueo temporal en un "sin datos" permanente.
+        if datos:
+            cache[clave] = datos
         time.sleep(PAUSA_ENTRE_CONSULTAS_BGG)
 
     if consultas:
         _guardar_cache_bgg(cache)
         print(f"   📚 BGG: {consultas} juegos consultados, el resto del caché.", flush=True)
     return cache
+
+
+def _precio_plausible(precio):
+    """Descarta filas sin un precio utilizable antes de escribirlas."""
+    try:
+        valor = float(str(precio).replace(",", "."))
+    except (TypeError, ValueError):
+        return False
+    return 1 <= valor <= 100000
 
 
 def registrar_en_historial(iid, url_post, juegos):
@@ -745,6 +867,8 @@ def registrar_en_historial(iid, url_post, juegos):
             if es_nuevo:
                 escritor.writeheader()
             for nombre, precio, estado in juegos:
+                if not _precio_plausible(precio):
+                    continue
                 datos = cache.get(_clave_comparable(nombre), {})
                 en_wishlist = any(j in nombre.lower() for j in WISHLIST)
                 escritor.writerow({
@@ -811,10 +935,15 @@ def enviar_publicacion_correo(iid, url_post, texto_post, rutas_imgs=None, texto_
 
         # Bloque ya parseado: evita que el análisis posterior tenga que
         # deducir qué línea del texto libre es un juego con precio.
-        juegos = combinar_juegos(
-            extraer_juegos_con_precio(texto_post),
-            extraer_juegos_de_tabla_ocr(texto_ocr),
-        )
+        # Si la publicación enlaza su hoja y se pudo leer, esa es la fuente
+        # buena y el OCR de sus capturas solo añadiría el mismo catálogo mal
+        # transcrito ("Rush 8 Bash" junto a "Rush & Bash"), que el dedupe no
+        # puede unir porque los nombres difieren.
+        desde_hoja = extraer_juegos_de_google_sheet(texto_post)
+        fuentes = [desde_hoja, extraer_juegos_con_precio(texto_post)]
+        if not desde_hoja:
+            fuentes.append(extraer_juegos_de_tabla_ocr(texto_ocr))
+        juegos = combinar_juegos(*fuentes)
         bloque_juegos = formatear_juegos_para_correo(juegos)
         registrar_en_historial(iid, url_post, juegos)
 
