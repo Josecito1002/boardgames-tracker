@@ -85,6 +85,16 @@ PALABRAS_CLAVE_JUEGO = [
     "guia del dungeon master",
 ]
 
+# IDs que quieres volver a recibir aunque ya estén en vistos.json (por
+# ejemplo, si el correo salió pero no alcanzaste a analizarlo). Se sacan del
+# historial al arrancar, así que la publicación vuelve a tratarse como nueva
+# y, si el envío sale bien, se vuelve a marcar como vista al terminar.
+# Da igual escribir "1039264158674649" o "GRUPO_1039264158674649".
+# Ojo: esto solo desbloquea el ID; la publicación además tiene que seguir
+# apareciendo en el grupo o en la búsqueda para que el scraper la encuentre.
+# Si ya no aparece, usa URLS_PRIORITARIAS con su enlace directo.
+FORZAR_REENVIO_IDS = []
+
 # Descartar las publicaciones de gente que BUSCA un juego ("Busco Bang!
 # Reloaded, nuevo o usado") en vez de venderlo. Ponlo en False si también
 # quieres enterarte de esas.
@@ -977,6 +987,36 @@ def raspar_grupo(page, url_grupo, vistos, max_posts=MAX_POSTS_GRUPO):
         print(f"Error al raspar el grupo: {e}", flush=True)
 
 
+def olvidar_ids_forzados(vistos):
+    """Saca de vistos los IDs marcados para reenvío en FORZAR_REENVIO_IDS."""
+    pedidos = 0
+    sacados = []
+    for entrada in FORZAR_REENVIO_IDS:
+        base = str(entrada).strip()
+        if not base:
+            continue
+        pedidos += 1
+        if base.startswith("GRUPO_"):
+            base = base[len("GRUPO_"):]
+        # No se sabe de qué fuente venía el ID, así que se prueban las dos
+        # formas con que se guarda.
+        for variante in (base, f"GRUPO_{base}"):
+            if variante in vistos:
+                vistos.discard(variante)
+                sacados.append(variante)
+
+    if pedidos:
+        # Sin enmascarar: son IDs de publicaciones, igual que los que ya se
+        # imprimen al abrirlas, y aquí hace falta saber cuáles se liberaron.
+        detalle = " | ".join(sacados) if sacados else "ninguno estaba"
+        print(
+            f"♻️ Reenvío forzado: {len(sacados)} de {pedidos} IDs"
+            f" sacados del historial ({detalle}).",
+            flush=True,
+        )
+    return vistos
+
+
 def raspar():
     vistos = set()
     if os.path.exists("vistos.json"):
@@ -985,6 +1025,8 @@ def raspar():
                 vistos = set(json.load(f))
         except Exception:
             pass
+
+    olvidar_ids_forzados(vistos)
 
     with sync_playwright() as p:
         b = p.chromium.launch(headless=True)
