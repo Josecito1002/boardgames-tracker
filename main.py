@@ -11,7 +11,6 @@ import time
 import unicodedata
 import urllib.parse
 import urllib.request
-import xml.etree.ElementTree as ET
 from PIL import Image
 from playwright.sync_api import sync_playwright
 import pytesseract
@@ -175,23 +174,8 @@ LINEAS_BASURA_INTERFAZ = {
 ARCHIVO_HISTORIAL = "historial.csv"
 COLUMNAS_HISTORIAL = [
     "Fecha", "ID Publicacion", "Juego", "Precio GTQ", "Estado",
-    "En Wishlist", "BGG Nombre", "BGG Rating", "BGG Complejidad", "Enlace",
+    "En Wishlist", "Enlace",
 ]
-
-# BoardGameGeek tiene API pública y gratuita, así que el rating y la
-# complejidad no necesitan ningún modelo de lenguaje. Cada juego se consulta
-# una sola vez en su vida: el resultado se guarda en este caché, que también
-# se commitea.
-# Apagado: BoardGameGeek rechaza las peticiones desde los runners de GitHub
-# Actions. Se probó con User-Agent propio (401), con uno de navegador (403) y
-# contra api.geekdo.com (403 también), así que el bloqueo es por origen y no
-# hay cabecera que lo evite. El código se queda por si algún día se ejecuta
-# desde otra red; mientras tanto, rating y complejidad los rellena la tarea
-# externa, que sí puede navegar.
-CONSULTAR_BGG = False
-ARCHIVO_CACHE_BGG = "bgg_cache.json"
-MAX_CONSULTAS_BGG_POR_CORRIDA = 40
-PAUSA_ENTRE_CONSULTAS_BGG = 1.5  # segundos; BGG limita las peticiones seguidas
 
 # Correo que se envía al terminar una corrida en la que SÍ se notificó al
 # menos una publicación. Sirve de detonador para el análisis posterior: en
@@ -792,121 +776,6 @@ def extraer_texto_de_imagenes(rutas_imgs):
     return "\n\n".join(texto_acumulado)
 
 
-def _leer_cache_bgg():
-    if os.path.exists(ARCHIVO_CACHE_BGG):
-        try:
-            with open(ARCHIVO_CACHE_BGG, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
-
-def _guardar_cache_bgg(cache):
-    try:
-        with open(ARCHIVO_CACHE_BGG, "w", encoding="utf-8") as f:
-            json.dump(cache, f, indent=2, ensure_ascii=False, sort_keys=True)
-    except Exception as e:
-        print(f"   Aviso: no se pudo guardar el caché de BGG: {e}", flush=True)
-
-
-# BoardGameGeek sirve la misma API por dos dominios. El primero suele estar
-# detrás de protección anti-bots y devolvía 401 con un User-Agent propio y
-# 403 con uno de navegador; api.geekdo.com es el que usan los clientes
-# programáticos. Se prueban los dos antes de rendirse.
-HOSTS_BGG = (
-    "https://api.geekdo.com/xmlapi2",
-    "https://boardgamegeek.com/xmlapi2",
-)
-
-
-def _pedir_xml(ruta, timeout=20):
-    ultimo_error = None
-    for host in HOSTS_BGG:
-        try:
-            peticion = urllib.request.Request(
-                f"{host}{ruta}",
-                headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/122.0 Safari/537.36"
-                    ),
-                    "Accept": "application/xml, text/xml, */*",
-                    "Accept-Language": "en-US,en;q=0.9",
-                },
-            )
-            with urllib.request.urlopen(peticion, timeout=timeout) as respuesta:
-                return ET.fromstring(respuesta.read())
-        except Exception as e:
-            ultimo_error = e
-    raise ultimo_error
-
-
-def consultar_bgg(nombre):
-    """Rating y complejidad de un juego en BoardGameGeek.
-
-    Devuelve un dict con bgg_nombre, rating y complejidad; vacío si no se
-    encuentra o si la consulta falla. Nunca lanza: un fallo de red no debe
-    tumbar la corrida, y la columna vacía es una respuesta aceptable.
-    """
-    try:
-        consulta = urllib.parse.quote(nombre)
-        raiz = _pedir_xml(f"/search?query={consulta}&type=boardgame")
-        item = raiz.find("item")
-        if item is None:
-            # Búsqueda válida sin resultados: eso sí se puede cachear.
-            return {"bgg_nombre": "", "rating": "", "complejidad": ""}
-        bgg_id = item.get("id")
-        nombre_bgg = item.find("name")
-        nombre_bgg = nombre_bgg.get("value") if nombre_bgg is not None else ""
-
-        time.sleep(PAUSA_ENTRE_CONSULTAS_BGG)
-        detalle = _pedir_xml(f"/thing?id={bgg_id}&stats=1")
-        promedio = detalle.find(".//statistics/ratings/average")
-        peso = detalle.find(".//statistics/ratings/averageweight")
-        return {
-            "bgg_nombre": nombre_bgg,
-            "rating": round(float(promedio.get("value")), 2) if promedio is not None else "",
-            "complejidad": round(float(peso.get("value")), 2) if peso is not None else "",
-        }
-    except Exception as e:
-        print(f"   Aviso: BGG falló para {nombre!r}: {e}", flush=True)
-        return {}
-
-
-def enriquecer_con_bgg(juegos):
-    """Añade los datos de BGG a cada juego, consultando solo los nuevos."""
-    if not (CONSULTAR_BGG and juegos):
-        return {}
-
-    cache = _leer_cache_bgg()
-    consultas = 0
-    for nombre, _precio, _estado in juegos:
-        clave = _clave_comparable(nombre)
-        if clave in cache:
-            continue
-        if consultas >= MAX_CONSULTAS_BGG_POR_CORRIDA:
-            print(
-                "   Aviso: alcanzado el tope de consultas a BGG en esta"
-                " corrida; el resto queda sin datos hasta la próxima.",
-                flush=True,
-            )
-            break
-        datos = consultar_bgg(nombre)
-        consultas += 1
-        # Solo se cachea un resultado bueno. Cachear el fallo convertiría un
-        # corte de red o un bloqueo temporal en un "sin datos" permanente.
-        if datos:
-            cache[clave] = datos
-        time.sleep(PAUSA_ENTRE_CONSULTAS_BGG)
-
-    if consultas:
-        _guardar_cache_bgg(cache)
-        print(f"   📚 BGG: {consultas} juegos consultados, el resto del caché.", flush=True)
-    return cache
-
-
 def _precio_plausible(precio):
     """Descarta filas sin un precio utilizable antes de escribirlas."""
     try:
@@ -938,7 +807,6 @@ def registrar_en_historial(iid, url_post, juegos):
         print(f"   El historial ya tiene el ID {iid}; no se reescribe.", flush=True)
         return 0
 
-    cache = enriquecer_con_bgg(juegos)
     fecha = time.strftime("%Y-%m-%d")
     es_nuevo = not os.path.exists(ARCHIVO_HISTORIAL)
     try:
@@ -949,7 +817,6 @@ def registrar_en_historial(iid, url_post, juegos):
             for nombre, precio, estado in juegos:
                 if not _precio_plausible(precio):
                     continue
-                datos = cache.get(_clave_comparable(nombre), {})
                 en_wishlist = any(j in nombre.lower() for j in WISHLIST)
                 escritor.writerow({
                     "Fecha": fecha,
@@ -958,9 +825,6 @@ def registrar_en_historial(iid, url_post, juegos):
                     "Precio GTQ": precio,
                     "Estado": estado,
                     "En Wishlist": "sí" if en_wishlist else "",
-                    "BGG Nombre": datos.get("bgg_nombre", ""),
-                    "BGG Rating": datos.get("rating", ""),
-                    "BGG Complejidad": datos.get("complejidad", ""),
                     "Enlace": url_post,
                 })
         print(f"   🗒️ Historial: {len(juegos)} filas añadidas para {iid}.", flush=True)
