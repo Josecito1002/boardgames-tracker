@@ -113,6 +113,38 @@ PATRONES_VENTA = [
     r"\bq\s?[1-9]\d*",
 ]
 
+# Líneas que Facebook mete en el texto de la página y que no son parte de la
+# publicación: menú, contadores, botones y el alt de las imágenes que todavía
+# no cargan (por eso salían decenas de "Facebook" seguidos en los correos).
+# Se comparan en minúsculas y sin espacios alrededor, contra la línea entera,
+# para no recortar nunca una descripción que contenga alguna de estas palabras.
+LINEAS_BASURA_INTERFAZ = {
+    "facebook",
+    "buscar amigos",
+    "enviar mensaje",
+    "detalles",
+    "ver traducción",
+    "ver traduccion",
+    "ver más",
+    "ver mas",
+    "publicación compartida",
+    "publicacion compartida",
+    "insignia de contenido destacado",
+    "actividad reciente",
+    "destacados",
+    "compartir",
+    "me gusta",
+    "comentar",
+    "guardar",
+    "marketplace",
+    "inicio",
+    "invitar",
+    "miembro",
+    "más información",
+    "mas informacion",
+    "vender algo",
+}
+
 # Cuántas publicaciones nuevas procesar como máximo por corrida.
 # Cada una implica abrirla, descargar fotos, pasarles OCR y enviar el correo,
 # así que subirlas alarga la corrida y la cantidad de correos de golpe.
@@ -214,8 +246,8 @@ def es_publicacion_valida(texto, termino_busqueda=""):
 
 
 def limpiar_texto_marketplace(texto_crudo):
-    """Corta únicamente bloques estructurales de Facebook sin dañar la descripción."""
-    t = texto_crudo
+    """Corta los bloques estructurales de Facebook sin dañar la descripción."""
+    t = texto_crudo.replace("\xa0", " ")
     cortes = [
         "\nSugerencias de hoy",
         "\nInformación del vendedor",
@@ -225,7 +257,36 @@ def limpiar_texto_marketplace(texto_crudo):
     for corte in cortes:
         if corte in t:
             t = t.split(corte)[0]
-    return t.strip()
+
+    # Los cortes de arriba solo limpian el final; la cabecera de Facebook
+    # (menú, contadores, placeholders) se cuela al inicio y llegaba tal cual
+    # al correo. Se filtra línea por línea.
+    limpias = []
+    venia_contador = False
+    for linea in t.splitlines():
+        actual = linea.strip()
+        clave = actual.lower()
+
+        # "Número de notificaciones no leídas" viene seguido del número suelto.
+        if clave.startswith(("número de notificaciones", "numero de notificaciones")):
+            venia_contador = True
+            continue
+        if venia_contador and actual.isdigit():
+            venia_contador = False
+            continue
+        venia_contador = False
+
+        if clave in LINEAS_BASURA_INTERFAZ:
+            continue
+        # Líneas que solo traen puntuación suelta: '.', '·', separadores.
+        if actual and not re.search(r"[0-9a-záéíóúüñ]", clave):
+            continue
+        # Placeholders repetidos y espacios en blanco de más.
+        if limpias and actual == limpias[-1]:
+            continue
+        limpias.append(actual)
+
+    return "\n".join(limpias).strip()
 
 
 def expandir_todo_el_texto(page):
