@@ -351,6 +351,24 @@ PREFIJOS_NO_JUEGO = (
     "martes", "miercoles", "jueves", "viernes", "sabados", "sabado",
     "domingos", "domingo", "solo", "unicamente", "tambien", "ademas",
 )
+# Marcadores donde termina el nombre del juego y empieza la descripción de
+# su estado: "catan caja dañada 8/10" es el juego "catan". Se corta en el
+# primero que aparezca. Las ediciones entre paréntesis, como "Rummikub
+# (Deluxe Edition)", no llevan ninguno y se conservan enteras.
+MARCADORES_DE_ESTADO = re.compile(
+    r"\b\d{1,2}\s?/\s?10\b"
+    r"|\b(?:completo|completa|incompleto|incompleta)\b"
+    r"|\b(?:nuevo|nueva|nuevos|nuevas|seminuevo)\b"
+    r"|\b(?:usado|usada|abierto|abierta|sellado|sellada)\b"
+    r"|\bcaja\s+(?:da[ñn]ad[ao]|abollada|maltratada|rota|sin|con)\b"
+    r"|\bdetalles?\s+(?:en|de)\b"
+    r"|\bfaltan?\b"
+    r"|\b(?:como\s+nuevo|sin\s+uso|poco\s+uso)\b"
+    r"|\b(?:excelente|buen|mal|mal[ií]simo)\s+estado\b"
+    r"|\ben\s+idioma\b",
+    re.IGNORECASE,
+)
+
 # Una línea que termina en preposición o artículo está cortada a la mitad
 # ("Entrego por", "Sábados por"): no es el nombre de nada.
 FINALES_TRUNCADOS = (
@@ -397,6 +415,25 @@ def _nombre_de_juego(bruto):
     return nombre
 
 
+def separar_estado(nombre):
+    """Parte "catan caja dañada 8/10" en ("catan", "caja dañada 8/10").
+
+    El nombre limpio es el que sirve para buscar en BoardGameGeek y para
+    que dos anuncios del mismo juego caigan en la misma fila; el estado se
+    conserva aparte en vez de tirarse.
+    """
+    encontrado = MARCADORES_DE_ESTADO.search(nombre)
+    if not encontrado:
+        return nombre, ""
+
+    limpio = nombre[: encontrado.start()].strip(" -–—:,;(·")
+    nota = nombre[encontrado.start():].strip(" -–—:,;·")
+    # Si no queda nombre antes del marcador, la línea era solo estado.
+    if len(limpio) < 3:
+        return nombre, ""
+    return limpio, nota
+
+
 def extraer_juegos_con_precio(texto):
     """Saca pares (juego, precio) del texto ya limpio de la publicación.
 
@@ -407,8 +444,8 @@ def extraer_juegos_con_precio(texto):
     Es una heurística sobre texto libre: prefiere dejar fuera una línea
     dudosa a registrar una frase suelta como si fuera un juego.
 
-    Devuelve una lista de tuplas (nombre, precio_texto) en el orden en que
-    aparecen, sin repetir el mismo par.
+    Devuelve una lista de tuplas (nombre, precio_texto, estado) en el orden
+    en que aparecen, sin repetir el mismo juego con el mismo precio.
     """
     patron_precio = re.compile(r"Q\s?([\d.,]+)", re.IGNORECASE)
 
@@ -439,8 +476,10 @@ def extraer_juegos_con_precio(texto):
             nombre = nombre_pendiente
         nombre_pendiente = None
 
-        if nombre and (nombre, precio) not in juegos:
-            juegos.append((nombre, precio))
+        if nombre:
+            limpio, estado = separar_estado(nombre)
+            if (limpio, precio) not in [(j[0], j[1]) for j in juegos]:
+                juegos.append((limpio, precio, estado))
 
     return juegos
 
@@ -449,7 +488,9 @@ def formatear_juegos_para_correo(juegos):
     """Bloque de texto plano, una línea por juego, fácil de leer en bloque."""
     if not juegos:
         return "ninguno (no se encontraron líneas con precio en quetzales)"
-    return "\n".join(f"{nombre} | {precio}" for nombre, precio in juegos)
+    return "\n".join(
+        f"{nombre} | {precio} | {estado}" for nombre, precio, estado in juegos
+    )
 
 
 def expandir_todo_el_texto(page):
@@ -534,7 +575,7 @@ def enviar_publicacion_correo(iid, url_post, texto_post, rutas_imgs=None, texto_
             <h2>🎲 Publicación detectada: ID {iid}</h2>
             <p><b>Enlace directo:</b> <a href="{url_post}">{url_post}</a></p>
             <hr>
-            <h3>Juegos detectados ({len(juegos)}) — formato "Juego | Precio GTQ":</h3>
+            <h3>Juegos detectados ({len(juegos)}) — formato "Juego | Precio GTQ | Estado":</h3>
             <pre style="background: #eefbf1; padding: 12px; border-radius: 6px; white-space: pre-wrap; font-size: 14px;">{bloque_juegos}</pre>
             <hr>
             <h3>Descripción limpia de la publicación:</h3>
