@@ -24,7 +24,12 @@ GMAIL_USER = os.environ.get("GMAIL_USER")
 GMAIL_APP_PASS = os.environ.get("GMAIL_APP_PASS")
 
 # 1. Enlaces prioritarios (deja vacío; solo añade si tienes un post nuevo puntual)
-URLS_PRIORITARIAS = []
+URLS_PRIORITARIAS = [
+    # Publicación puntual con catálogo grande. Se procesa una sola vez: al
+    # enviarse el correo queda en vistos.json y las corridas siguientes la
+    # saltan. Se puede borrar de aquí después.
+    "https://www.facebook.com/share/p/1EtvvX7izt/",
+]
 
 # 2. Grupos de Facebook a rastrear (pestaña de Compraventa, no el feed general)
 URLS_GRUPOS = [
@@ -301,6 +306,34 @@ def limpiar_texto_marketplace(texto_crudo):
         limpias.append(actual)
 
     return "\n".join(limpias).strip()
+
+
+def id_desde_url_publicacion(url_final, url_original=""):
+    """Deduce un ID estable para una publicación a partir de su URL.
+
+    Facebook usa formas distintas según de dónde venga el enlace, y los
+    enlaces cortos /share/p/<codigo>/ redirigen a cualquiera de ellas. Si
+    ninguna coincide se usa el código del enlace corto, que al menos es
+    único y estable entre corridas — a diferencia de un número de posición,
+    que se reutilizaría con la siguiente publicación prioritaria.
+    """
+    for patron in (
+        r"/item/(\d+)",
+        r"/commerce/listing/(\d+)",
+        r"/posts/(\d+)",
+        r"/permalink/(\d+)",
+        r"/multi_permalinks/(\d+)",
+        r"[?&]story_fbid=(\d+)",
+        r"[?&]fbid=(\d+)",
+    ):
+        encontrado = re.search(patron, url_final)
+        if encontrado:
+            return encontrado.group(1)
+
+    codigo = re.search(r"/share/p/([A-Za-z0-9]+)", url_original or url_final)
+    if codigo:
+        return f"share_{codigo.group(1)}"
+    return ""
 
 
 def extraer_juegos_con_precio(texto):
@@ -1153,8 +1186,14 @@ def raspar():
                 page.wait_for_timeout(3000)
 
                 real_url = page.url
-                m = re.search(r"/item/(\d+)", real_url)
-                iid = m.group(1) if m else f"prio_{idx}"
+                iid = id_desde_url_publicacion(real_url, url_prio)
+                if not iid:
+                    print(
+                        f"   ⚠️ No se pudo deducir un ID de {real_url};"
+                        " se omite para no guardarla con un ID inestable.",
+                        flush=True,
+                    )
+                    continue
 
                 if iid in vistos:
                     print(f"   Ya notificado antes (ID {iid}), se omite.", flush=True)
