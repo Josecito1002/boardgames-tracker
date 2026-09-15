@@ -7,6 +7,7 @@ import re
 import smtplib
 import ssl
 import time
+import unicodedata
 import urllib.parse
 import urllib.request
 from PIL import Image
@@ -336,6 +337,66 @@ def id_desde_url_publicacion(url_final, url_original=""):
     return ""
 
 
+# Frases que aparecen junto a un precio pero no son el nombre de un juego.
+# Se comparan sin acentos, en minúsculas y contra la línea ya recortada.
+FRASES_NO_JUEGO_EXACTAS = {
+    "precio", "oferta", "disponible", "entrego", "entrega", "envio",
+    "negociable", "nuevo", "usado", "detalles", "informacion", "total",
+    "juegos", "juego", "combo", "promocion", "descuento", "unidad",
+}
+PREFIJOS_NO_JUEGO = (
+    "publicado en", "la ubicacion", "guatemala", "precio", "entrego",
+    "entrega", "envio", "pago", "acepto", "interesados", "mas informacion",
+    "excelente estado", "buen estado", "que incluye", "horario", "lunes",
+    "martes", "miercoles", "jueves", "viernes", "sabados", "sabado",
+    "domingos", "domingo", "solo", "unicamente", "tambien", "ademas",
+)
+# Una línea que termina en preposición o artículo está cortada a la mitad
+# ("Entrego por", "Sábados por"): no es el nombre de nada.
+FINALES_TRUNCADOS = (
+    "por", "de", "en", "con", "para", "y", "a", "el", "la", "los", "las",
+    "un", "una", "al", "del", "que", "o",
+)
+
+
+def _clave_comparable(texto):
+    """Minúsculas, sin acentos y sin puntuación en los bordes."""
+    base = unicodedata.normalize("NFD", texto.lower())
+    base = "".join(c for c in base if unicodedata.category(c) != "Mn")
+    return re.sub(r"\s+", " ", base).strip(" .,:;-–—¿?¡!*")
+
+
+def _nombre_de_juego(bruto):
+    """Devuelve el nombre de juego utilizable de una línea, o None.
+
+    Existe porque la versión anterior aceptaba cualquier línea con letras
+    que tuviera un precio cerca, y acababa registrando "Entrego por",
+    "💰 Precio" u "Oferta juegos de mesa" como si fueran juegos.
+    """
+    # Emojis y símbolos de los bordes: sin esto "💰 Precio" no se reconoce
+    # como la palabra "precio".
+    nombre = re.sub(r"^[^\w¿¡(]+", "", bruto, flags=re.UNICODE)
+    nombre = re.sub(r"[^\w)\]?!.]+$", "", nombre, flags=re.UNICODE).strip()
+
+    # "Juegos de mesa Jenga tradicional" -> "Jenga tradicional".
+    # Si tras quitar la categoría no queda nada, era solo la categoría.
+    nombre = re.sub(r"^(?:vendo|oferta|nuevos?|nueva)\s+", "", nombre, flags=re.I)
+    nombre = re.sub(
+        r"^juegos?\s+de\s+mesa\b[\s:,\-–—]*", "", nombre, flags=re.I
+    ).strip()
+
+    clave = _clave_comparable(nombre)
+    if len(clave) < 3 or len(nombre) > 80:
+        return None
+    if not re.search(r"[a-z]", clave):
+        return None
+    if clave in FRASES_NO_JUEGO_EXACTAS or clave.startswith(PREFIJOS_NO_JUEGO):
+        return None
+    if clave.split()[-1] in FINALES_TRUNCADOS:
+        return None
+    return nombre
+
+
 def extraer_juegos_con_precio(texto):
     """Saca pares (juego, precio) del texto ya limpio de la publicación.
 
@@ -343,27 +404,13 @@ def extraer_juegos_con_precio(texto):
     un juego: las publicaciones de catálogo traen veinte o más juegos, uno
     por línea con su precio, y hacer ese trabajo aquí sale gratis.
 
+    Es una heurística sobre texto libre: prefiere dejar fuera una línea
+    dudosa a registrar una frase suelta como si fuera un juego.
+
     Devuelve una lista de tuplas (nombre, precio_texto) en el orden en que
     aparecen, sin repetir el mismo par.
     """
-    # Un precio en quetzales: Q150, Q 150.00, Q1,250.00
     patron_precio = re.compile(r"Q\s?([\d.,]+)", re.IGNORECASE)
-    # Líneas que no son juegos aunque queden pegadas a un precio.
-    prefijos_no_juego = (
-        "publicado en",
-        "la ubicación es aproximada",
-        "disponible",
-        "guatemala",
-        "detalles",
-        "precio",
-    )
-
-    def _es_nombre_plausible(nombre):
-        if len(nombre) < 3:
-            return False
-        if not re.search(r"[a-záéíóúüñ]", nombre, re.IGNORECASE):
-            return False
-        return not nombre.lower().startswith(prefijos_no_juego)
 
     def _normalizar_precio(bruto):
         # "1,250.00" -> "1250.00"; "150" -> "150"
@@ -380,18 +427,19 @@ def extraer_juegos_con_precio(texto):
         if not coincidencia:
             # Puede ser el nombre de un juego cuyo precio viene en la línea
             # siguiente, como pasa cuando Facebook parte la línea.
-            nombre_pendiente = actual if _es_nombre_plausible(actual) else None
+            nombre_pendiente = _nombre_de_juego(actual)
             continue
 
         precio = _normalizar_precio(coincidencia.group(1))
-        nombre = actual[: coincidencia.start()].strip(" -–—:·\t")
+        nombre = _nombre_de_juego(actual[: coincidencia.start()])
 
-        if not _es_nombre_plausible(nombre):
-            # La línea era solo el precio: se une al nombre anterior.
-            nombre = nombre_pendiente or ""
+        if nombre is None:
+            # La línea era solo el precio, o texto que no es un juego: se
+            # intenta con el nombre de la línea anterior.
+            nombre = nombre_pendiente
         nombre_pendiente = None
 
-        if _es_nombre_plausible(nombre) and (nombre, precio) not in juegos:
+        if nombre and (nombre, precio) not in juegos:
             juegos.append((nombre, precio))
 
     return juegos
