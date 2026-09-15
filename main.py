@@ -303,6 +303,74 @@ def limpiar_texto_marketplace(texto_crudo):
     return "\n".join(limpias).strip()
 
 
+def extraer_juegos_con_precio(texto):
+    """Saca pares (juego, precio) del texto ya limpio de la publicación.
+
+    Existe para que el análisis posterior no tenga que deducir qué línea es
+    un juego: las publicaciones de catálogo traen veinte o más juegos, uno
+    por línea con su precio, y hacer ese trabajo aquí sale gratis.
+
+    Devuelve una lista de tuplas (nombre, precio_texto) en el orden en que
+    aparecen, sin repetir el mismo par.
+    """
+    # Un precio en quetzales: Q150, Q 150.00, Q1,250.00
+    patron_precio = re.compile(r"Q\s?([\d.,]+)", re.IGNORECASE)
+    # Líneas que no son juegos aunque queden pegadas a un precio.
+    prefijos_no_juego = (
+        "publicado en",
+        "la ubicación es aproximada",
+        "disponible",
+        "guatemala",
+        "detalles",
+        "precio",
+    )
+
+    def _es_nombre_plausible(nombre):
+        if len(nombre) < 3:
+            return False
+        if not re.search(r"[a-záéíóúüñ]", nombre, re.IGNORECASE):
+            return False
+        return not nombre.lower().startswith(prefijos_no_juego)
+
+    def _normalizar_precio(bruto):
+        # "1,250.00" -> "1250.00"; "150" -> "150"
+        return bruto.rstrip(".,").replace(",", "")
+
+    juegos = []
+    nombre_pendiente = None
+    for linea in texto.splitlines():
+        actual = linea.strip(" -–—:·\t")
+        if not actual:
+            continue
+
+        coincidencia = patron_precio.search(actual)
+        if not coincidencia:
+            # Puede ser el nombre de un juego cuyo precio viene en la línea
+            # siguiente, como pasa cuando Facebook parte la línea.
+            nombre_pendiente = actual if _es_nombre_plausible(actual) else None
+            continue
+
+        precio = _normalizar_precio(coincidencia.group(1))
+        nombre = actual[: coincidencia.start()].strip(" -–—:·\t")
+
+        if not _es_nombre_plausible(nombre):
+            # La línea era solo el precio: se une al nombre anterior.
+            nombre = nombre_pendiente or ""
+        nombre_pendiente = None
+
+        if _es_nombre_plausible(nombre) and (nombre, precio) not in juegos:
+            juegos.append((nombre, precio))
+
+    return juegos
+
+
+def formatear_juegos_para_correo(juegos):
+    """Bloque de texto plano, una línea por juego, fácil de leer en bloque."""
+    if not juegos:
+        return "ninguno (no se encontraron líneas con precio en quetzales)"
+    return "\n".join(f"{nombre} | {precio}" for nombre, precio in juegos)
+
+
 def expandir_todo_el_texto(page):
     """Despliega todos los botones 'Ver más' para obtener el catálogo completo."""
     try:
@@ -374,11 +442,19 @@ def enviar_publicacion_correo(iid, url_post, texto_post, rutas_imgs=None, texto_
             <hr>
             """
 
+        # Bloque ya parseado: evita que el análisis posterior tenga que
+        # deducir qué línea del texto libre es un juego con precio.
+        juegos = extraer_juegos_con_precio(texto_post)
+        bloque_juegos = formatear_juegos_para_correo(juegos)
+
         html_content = f"""
         <html>
           <body style="font-family: Arial, sans-serif; color: #222;">
             <h2>🎲 Publicación detectada: ID {iid}</h2>
             <p><b>Enlace directo:</b> <a href="{url_post}">{url_post}</a></p>
+            <hr>
+            <h3>Juegos detectados ({len(juegos)}) — formato "Juego | Precio GTQ":</h3>
+            <pre style="background: #eefbf1; padding: 12px; border-radius: 6px; white-space: pre-wrap; font-size: 14px;">{bloque_juegos}</pre>
             <hr>
             <h3>Descripción limpia de la publicación:</h3>
             <pre style="background: #f4f4f4; padding: 12px; border-radius: 6px; white-space: pre-wrap; font-size: 14px;">{texto_post}</pre>
