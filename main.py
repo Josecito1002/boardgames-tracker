@@ -68,6 +68,19 @@ PALABRAS_DESCARTAR = [
     "burger king",
     "lamparas de metal",
     "alquiler de juegos",
+    # Mobiliario que se anuncia como "juego de mesas": en el título no
+    # aparece "silla" ni "comedor", así que los descartes de arriba no lo
+    # veían y llegaba por correo. Ojo al plural: "juegos de mesa" son los de
+    # tablero, "juego de mesas" es un comedor.
+    "restaurante",
+    "mesas para",
+    "mesas y sillas",
+    "juego de mesas",
+    "bancas",
+    "banca",
+    "taburete",
+    "mobiliario",
+    "comensales",
 ]
 
 # Palabras que salvan la publicación si coincide con juegos de mesa o rol
