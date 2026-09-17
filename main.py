@@ -383,6 +383,11 @@ FRASES_NO_JUEGO_EXACTAS = {
     "precio", "oferta", "disponible", "entrego", "entrega", "envio",
     "negociable", "nuevo", "usado", "detalles", "informacion", "total",
     "juegos", "juego", "combo", "promocion", "descuento", "unidad",
+    # Botones y textos de la interfaz del grupo.
+    "crear una publicacion", "escribe algo", "vender algo", "anadir",
+    # Línea de tarifa de envío: "Capital Q25" es el costo de llevarlo a la
+    # capital, no un juego que se llame así.
+    "capital", "departamentos", "interior",
 }
 PREFIJOS_NO_JUEGO = (
     "publicado en", "la ubicacion", "guatemala", "precio", "entrego",
@@ -490,7 +495,14 @@ def separar_estado(nombre):
     if not encontrado:
         return nombre, ""
 
-    limpio = nombre[: encontrado.start()].strip(" -–—:,;(·")
+    # Si el marcador cae dentro de un paréntesis abierto forma parte del
+    # título: "The Game of Life (Edición Electrónica, Completo)" no debe
+    # partirse en "The Game of Life (Edición Electrónica" y "Completo)".
+    previo = nombre[: encontrado.start()]
+    if previo.count("(") > previo.count(")"):
+        return nombre, ""
+
+    limpio = previo.strip(" -–—:,;(·")
     nota = nombre[encontrado.start():].strip(" -–—:,;·")
     # Si no queda nombre antes del marcador, la línea era solo estado.
     if len(limpio) < 3:
@@ -510,7 +522,10 @@ def _juego_de_anuncio_individual(texto):
     lineas = [l.strip() for l in texto.splitlines() if l.strip()]
     if not lineas:
         return []
-    nombre = _nombre_de_juego(lineas[0])
+    # El precio suele ir en su propia línea, pero cuando comparte línea con
+    # el título hay que quitarlo o acabaría pegado al nombre ("Catan Q350").
+    titulo = re.sub(r"Q\s?[\d.,]+", " ", lineas[0]).strip()
+    nombre = _nombre_de_juego(titulo)
     if not nombre:
         return []
     precio = re.search(r"Q\s?([\d.,]+)", texto)
